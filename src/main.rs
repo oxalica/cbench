@@ -23,6 +23,7 @@ struct Args {
     help: bool,
     use_sudo: Option<OsString>,
     dry_run: bool,
+    cpus: Vec<u32>,
     subcommand: OsString,
     rest_args: Vec<OsString>,
     verbatim_args: Vec<OsString>,
@@ -43,6 +44,21 @@ impl Args {
         } else {
             args.opt_value_from_os_str("--use-sudo", |s| Ok::<_, Infallible>(s.to_owned()))?
         };
+        this.cpus = args
+            .opt_value_from_fn("--cpus", |arg| {
+                arg.split(',')
+                    .map(|spec| {
+                        let (start, end) = match spec.split_once('-') {
+                            Some((start, end)) => (start.parse()?, Some(end.parse()?)),
+                            None => (spec.parse::<u32>()?, None),
+                        };
+                        Ok(start..=end.unwrap_or(start))
+                    })
+                    .flatten_ok()
+                    .collect::<Result<Vec<_>>>()
+            })?
+            .unwrap_or_else(|| vec![1]);
+
         this.rest_args = args.finish();
         let subcmd = this
             .rest_args
@@ -81,7 +97,13 @@ fn main() -> ExitCode {
             args.verbatim_args.insert(0, "--bench".into());
             let mut benches = Vec::new();
             main_build(&args.rest_args, &mut benches).and_then(|()| {
-                main_exec(&benches, &args.verbatim_args, args.use_sudo, args.dry_run)
+                main_exec(
+                    &benches,
+                    &args.verbatim_args,
+                    args.use_sudo,
+                    args.dry_run,
+                    args.cpus,
+                )
             })
         } else {
             args.rest_args.extend(args.verbatim_args);
@@ -90,6 +112,7 @@ fn main() -> ExitCode {
                 &args.rest_args,
                 args.use_sudo,
                 args.dry_run,
+                args.cpus,
             )
         }
     };
@@ -120,6 +143,12 @@ Options:
   --use-sudo[=<SUDO_CMD>]   Use 'sudo' or SUDO_CMD to execute 'systemd-run'
                             instead of running it as current user and use its
                             own authentication method (polkit, by default)
+  --cpus=SPECS
+  --cpus SPECS              Run benchmarks on specific CPUs exclusively. SPECS
+                            use the `AllowedCPUs=` syntax from
+                            systemd.resource-control(5). Default: `1`.
+                            Note that CPU 0 and its siblings must not be used,
+                            since it's likely used for system tasks.
 "
     );
 }
@@ -201,6 +230,7 @@ fn main_exec(
     bench_args: &[impl AsRef<OsStr>],
     sudo_cmd: Option<impl AsRef<OsStr>>,
     dry_run: bool,
+    mut cpus: Vec<u32>,
 ) -> Result<()> {
     const LOCK_NAME: &str = "cargo-cbench.lock";
 
@@ -243,8 +273,6 @@ fn main_exec(
         ("", String::new())
     };
 
-    // TODO: Configurable.
-    let mut cpus = vec![1, 2];
     cpus.sort_unstable();
     cpus.dedup();
     let mut sibling_cpus = Vec::new();
@@ -252,18 +280,26 @@ fn main_exec(
         let siblings = fs::read_to_string(format!(
             "/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list"
         ))
-        .context("failed to read CPU thread siblings")?;
+        .with_context(|| format!("failed to get siblings of CPU {cpu}, index out of bound?"))?;
         for sibling in siblings.trim_end().split(',') {
             let sibling = sibling
                 .parse::<u32>()
-                .with_context(|| format!("failed to parse CPU thread siblings: {siblings}"))?;
+                .with_context(|| format!("failed to parse siblings of CPU {cpu}: {siblings:?}"))?;
             if sibling != cpu {
+                ensure!(
+                    !cpus.contains(&sibling),
+                    "CPU {cpu} and {sibling} are siblings, only one can be specified",
+                );
                 sibling_cpus.push(sibling);
             }
         }
     }
     sibling_cpus.sort_unstable();
     sibling_cpus.dedup();
+    ensure!(
+        !cpus.contains(&0) && !sibling_cpus.contains(&0),
+        "CPU 0 and its siblints are not allowed for exclusive use",
+    );
     ensure!(cpus != *sibling_cpus, "all allowed CPUs are siblings");
     let allowed_cpus = cpus.iter().join(",");
     let sibling_cpus = sibling_cpus.iter().join(",");
