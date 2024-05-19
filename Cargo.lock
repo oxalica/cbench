@@ -41,6 +41,8 @@ dependencies = [
  "nix",
  "owo-colors",
  "pico-args",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

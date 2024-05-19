@@ -11,11 +11,10 @@ use itertools::Itertools;
 use named_lock::NamedLock;
 use owo_colors::OwoColorize;
 
-const ASLR_CTL: &str = "/proc/sys/kernel/randomize_va_space";
 const SERVICE_NAME: &str = "cbench.service";
 const SYSTEMD_RUN: &str = "systemd-run";
 
-const SETUP_ARG0: &str = "__setup";
+const SETUP_SENTINEL: &str = "__cbench_setup";
 
 #[derive(Debug, Default)]
 struct Args {
@@ -75,9 +74,14 @@ fn main() -> ExitCode {
     let argv0 = PathBuf::from(args_iter.next().expect("missing argv0"));
     let argv0 = argv0.file_stem().and_then(|s| s.to_str()).unwrap_or("");
 
-    let ret = if argv0 == SETUP_ARG0 {
-        let args = args_iter.map(|s| s.into_string().unwrap()).collect();
-        main_setup(args)
+    let ret = if argv0 == SETUP_SENTINEL {
+        let (is_enter, setup) = (|| -> Result<(bool, SetupArgs)> {
+            let is_enter = args_iter.next().context("missing argv1")? == "1";
+            let args = std::env::var(SETUP_SENTINEL).context("missing setup envvar")?;
+            Ok((is_enter, serde_json::from_str(&args)?))
+        })()
+        .expect("setup args must be valid");
+        main_setup(is_enter, &setup)
     } else {
         let mut args = match Args::parse(args_iter.collect()) {
             Ok(args) if !args.help => args,
@@ -184,29 +188,28 @@ fn main_build(cargo_args: &[impl AsRef<OsStr>], benches: &mut Vec<PathBuf>) -> R
     Ok(())
 }
 
+const ASLR_CTL: &str = "/proc/sys/kernel/randomize_va_space";
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetupArgs {
+    prev_aslr: String,
+    sibling_cpus: Vec<u32>,
+}
+
 /// Setup and cleanup of the benchmark environment.
 /// NB. This is executed with full privileges as root.
-fn main_setup(args: Vec<String>) -> Result<()> {
+fn main_setup(is_enter: bool, args: &SetupArgs) -> Result<()> {
     // Ignore termination signals.
     ctrlc::set_handler(|| {})?;
 
-    let aslr_state = &args[0];
-    let disable_sibling_cpus = args[1] == "1";
-    let sibling_cpus = args[2]
-        .split(',')
-        .skip_while(|s| s.is_empty())
-        .map(|s| s.parse::<u32>())
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-
-    if !aslr_state.is_empty() {
-        assert_eq!(aslr_state.len(), 1);
-        fs::write(ASLR_CTL, aslr_state)
-            .with_context(|| format!("failed to set ASLR state to {aslr_state:?}"))?;
+    if args.prev_aslr.trim() != "0" {
+        let data = if is_enter { "0" } else { &args.prev_aslr };
+        fs::write(ASLR_CTL, data)
+            .with_context(|| format!("failed to set ASLR state to {data:?}"))?;
     }
 
-    let set_cpuset_root = args[1] == "1";
-    if set_cpuset_root {
+    if is_enter {
         fs::write(
             format!("/sys/fs/cgroup/{SERVICE_NAME}/cpuset.cpus.partition"),
             "root",
@@ -214,14 +217,16 @@ fn main_setup(args: Vec<String>) -> Result<()> {
         .context("failed to set cpuset partition to root")?;
     }
 
-    let (data, op) = if disable_sibling_cpus {
-        ("0", "disable")
-    } else {
-        ("1", "enable")
-    };
-    for &cpu in &sibling_cpus {
-        fs::write(format!("/sys/devices/system/cpu/cpu{cpu}/online"), data)
-            .with_context(|| format!("failed to {op} CPU {cpu}"))?;
+    if !args.sibling_cpus.is_empty() {
+        let (data, op) = if is_enter {
+            ("0", "disable")
+        } else {
+            ("1", "enable")
+        };
+        for &cpu in &args.sibling_cpus {
+            fs::write(format!("/sys/devices/system/cpu/cpu{cpu}/online"), data)
+                .with_context(|| format!("failed to {op} CPU {cpu}"))?;
+        }
     }
 
     Ok(())
@@ -257,23 +262,10 @@ fn main_exec(
         .to_str()
         .context("current executable path is not UTF-8")?;
 
-    let mut prev_aslr = fs::read_to_string(ASLR_CTL).context("failed to get current ASLR state")?;
-    if prev_aslr.ends_with('\n') {
-        prev_aslr.pop();
+    let prev_aslr = fs::read_to_string(ASLR_CTL).context("failed to get current ASLR state")?;
+    if prev_aslr.trim() == "0" {
+        eprintln!("{}: ASLR is already disabled", "warning".yellow().bold());
     }
-    ensure!(
-        !prev_aslr.is_empty() && prev_aslr.chars().all(|c| c.is_ascii_digit()),
-        "invalid ASLR state: {prev_aslr:?}"
-    );
-    let (new_aslr, prev_aslr) = if prev_aslr != "0" {
-        ("0", prev_aslr)
-    } else {
-        eprintln!(
-            "{}: ASLR is already disabled, skipped setting",
-            "warning".yellow().bold(),
-        );
-        ("", String::new())
-    };
 
     cpus.sort_unstable();
     cpus.dedup();
@@ -303,8 +295,13 @@ fn main_exec(
         "CPU 0 and its siblints are not allowed for exclusive use",
     );
     ensure!(cpus != *sibling_cpus, "all allowed CPUs are siblings");
+
     let allowed_cpus = cpus.iter().join(",");
-    let sibling_cpus = sibling_cpus.iter().join(",");
+    let setup_args_json = serde_json::to_string(&SetupArgs {
+        prev_aslr,
+        sibling_cpus,
+    })
+    .expect("serialization cannot fail");
 
     for exe in bench_exes {
         let mut cmd = match &sudo_cmd {
@@ -330,13 +327,10 @@ fn main_exec(
                 &format!("--uid={}", nix::unistd::getuid().as_raw()),
                 &format!("--gid={}", nix::unistd::getgid().as_raw()),
                 "--same-dir",
+                &format!("--setenv={SETUP_SENTINEL}={setup_args_json}"),
                 &format!("--property=AllowedCPUs={allowed_cpus}"),
-                &format!(
-                    "--property=ExecStartPre=!@{self_exe} {SETUP_ARG0} '{new_aslr}' 1 '{sibling_cpus}'"
-                ),
-                &format!(
-                    "--property=ExecStopPost=!@{self_exe} {SETUP_ARG0} '{prev_aslr}' 0 '{sibling_cpus}'"
-                ),
+                &format!("--property=ExecStartPre=!@{self_exe} {SETUP_SENTINEL} 1"),
+                &format!("--property=ExecStopPost=!@{self_exe} {SETUP_SENTINEL} 0"),
             ]);
         cmd.arg("--");
         cmd.arg(exe.as_ref());
