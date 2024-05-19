@@ -12,7 +12,6 @@ use named_lock::NamedLock;
 use owo_colors::OwoColorize;
 
 const ASLR_CTL: &str = "/proc/sys/kernel/randomize_va_space";
-const CGROUP_CPUSET_PARTITION_CTL: &str = "/sys/fs/cgroup/cbench.service/cpuset.cpus.partition";
 const SERVICE_NAME: &str = "cbench.service";
 const SYSTEMD_RUN: &str = "systemd-run";
 
@@ -208,8 +207,11 @@ fn main_setup(args: Vec<String>) -> Result<()> {
 
     let set_cpuset_root = args[1] == "1";
     if set_cpuset_root {
-        fs::write(CGROUP_CPUSET_PARTITION_CTL, "root")
-            .context("failed to set cpuset partition to root")?;
+        fs::write(
+            format!("/sys/fs/cgroup/{SERVICE_NAME}/cpuset.cpus.partition"),
+            "root",
+        )
+        .context("failed to set cpuset partition to root")?;
     }
 
     let (data, op) = if disable_sibling_cpus {
