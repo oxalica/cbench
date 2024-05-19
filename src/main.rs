@@ -195,6 +195,7 @@ const ASLR_CTL: &str = "/proc/sys/kernel/randomize_va_space";
 struct SetupArgs {
     prev_aslr: String,
     sibling_cpus: Vec<u32>,
+    prev_governors: Vec<(u32, String)>,
 }
 
 /// Setup and cleanup of the benchmark environment.
@@ -227,6 +228,15 @@ fn main_setup(is_enter: bool, args: &SetupArgs) -> Result<()> {
             fs::write(format!("/sys/devices/system/cpu/cpu{cpu}/online"), data)
                 .with_context(|| format!("failed to {op} CPU {cpu}"))?;
         }
+    }
+
+    for (cpu, gov) in &args.prev_governors {
+        let data = if is_enter { "performance" } else { gov };
+        fs::write(
+            format!("/sys/devices/system/cpu/cpu{cpu}/cpufreq/scaling_governor"),
+            data,
+        )
+        .with_context(|| format!("failed to set scaling governor of CPU {cpu} to {data}"))?;
     }
 
     Ok(())
@@ -296,12 +306,24 @@ fn main_exec(
     );
     ensure!(cpus != *sibling_cpus, "all allowed CPUs are siblings");
 
-    let allowed_cpus = cpus.iter().join(",");
+    let prev_governors = cpus
+        .iter()
+        .map(|&cpu| {
+            let gov = fs::read_to_string(format!(
+                "/sys/devices/system/cpu/cpu{cpu}/cpufreq/scaling_governor"
+            ))
+            .with_context(|| format!("failed to read scaling governor of CPU {cpu}"))?;
+            Ok((cpu, gov))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
     let setup_args_json = serde_json::to_string(&SetupArgs {
         prev_aslr,
         sibling_cpus,
+        prev_governors,
     })
     .expect("serialization cannot fail");
+    let allowed_cpus = cpus.iter().join(",");
 
     for exe in bench_exes {
         let mut cmd = match &sudo_cmd {
