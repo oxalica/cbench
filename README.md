@@ -26,7 +26,7 @@ Currently only Linux/systemd is supported.
   hyper-threading is enabled, via [CPU hotplug][cpu-hotplug].
 - Set power governor of target CPU(s) to 'performance', via [CPU Performance Scaling][cpufreq].
 
-## Privilaged operations
+## Privileged operations
 
 All settings mentioned above are privileged and machine global. To minimize the
 impact and security risks, we leverage `systemd-run` privileged

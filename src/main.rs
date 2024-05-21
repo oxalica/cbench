@@ -343,7 +343,7 @@ fn main_exec(
                 &format!("--unit={SERVICE_NAME}"),
                 // It must be in a partition=root scope to set partition=root.
                 "--slice=-.slice",
-                "--description=Environment Controled Benchmarks",
+                "--description=Environment Controlled Benchmarks",
                 "--service-type=exec",
                 "--expand-environment=no",
                 &format!("--uid={}", nix::unistd::getuid().as_raw()),
