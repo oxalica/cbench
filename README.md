@@ -28,13 +28,14 @@ Currently only Linux/systemd is supported.
 
 ## What it does
 
-- Disable [Address Space Layout Randomization (ASLR)][aslr] via
+- `noaslr`: Disable [Address Space Layout Randomization (ASLR)][aslr] via
   [`/proc/sys/kernel/randomize_va_space`][randomize_va_space]
-- Pin the target process(es) on specific CPU(s) for exclusive access via
-  [cgroup cpuset][cpuset].
-- Disable (set offline) CPU thread siblings of the CPU(s) used if
+- `cpuset`: Pin the target process(es) on specific CPU(s) for exclusive access
+  via [cgroup cpuset][cpuset].
+- `noht`: Disable (set offline) CPU thread siblings of the CPU(s) used if
   hyper-threading is enabled, via [CPU hotplug][cpu-hotplug].
-- Set power governor of target CPU(s) to 'performance', via [CPU Performance Scaling][cpufreq].
+- `cpufreq`: Set power governor of target CPU(s) to 'performance' and disable
+  adaptive turbo/boost, via [CPU Performance Scaling][cpufreq].
 
 ## Privileged operations
 

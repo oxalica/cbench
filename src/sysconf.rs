@@ -7,22 +7,53 @@ use serde::{Deserialize, Serialize};
 
 use crate::SERVICE_NAME;
 
+type ModuleBuilder = fn(&SysConfArgs) -> Result<Box<dyn SysConf>>;
+pub static ALL_MODULES: &[(&str, ModuleBuilder)] = &[
+    ("noaslr", NoAslr::init_boxed),
+    ("cpuset", CpusetExclusive::init_boxed),
+    ("cpufreq", CpuFreq::init_boxed),
+    ("noht", NoHyperThreading::init_boxed),
+];
+
+#[derive(Debug)]
+pub struct SysConfArgs {
+    pub cpus: Vec<u32>,
+}
+
 /// Extensible system configuration change unit.
 #[typetag::serde(tag = "type")]
-pub trait SysConf: std::fmt::Debug {
+pub trait SysConf: std::fmt::Debug + 'static {
+    fn init(args: &SysConfArgs) -> Result<Self>
+    where
+        Self: Sized;
+
+    fn init_boxed(args: &SysConfArgs) -> Result<Box<dyn SysConf>>
+    where
+        Self: Sized,
+    {
+        Self::init(args).map(|this| Box::new(this) as _)
+    }
+
     fn enter(&self) -> Result<()>;
+
     fn leave(&self) -> Result<()>;
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Aslr {
+pub struct NoAslr {
     prev: Option<String>,
 }
 
-impl Aslr {
+impl NoAslr {
     const CTL_PATH: &'static str = "/proc/sys/kernel/randomize_va_space";
+}
 
-    pub fn init() -> Result<Self> {
+#[typetag::serde]
+impl SysConf for NoAslr {
+    fn init(_: &SysConfArgs) -> Result<Self>
+    where
+        Self: Sized,
+    {
         let st = fs::read_to_string(Self::CTL_PATH).context("failed to get current ASLR state")?;
         let st = if st.trim() == "0" {
             eprintln!("{}: ASLR is already disabled", "warning".yellow().bold());
@@ -32,10 +63,7 @@ impl Aslr {
         };
         Ok(Self { prev: st })
     }
-}
 
-#[typetag::serde]
-impl SysConf for Aslr {
     fn enter(&self) -> Result<()> {
         fs::write(Self::CTL_PATH, "0").context("failed to disable ASLR")
     }
@@ -54,6 +82,13 @@ pub struct CpusetExclusive;
 
 #[typetag::serde]
 impl SysConf for CpusetExclusive {
+    fn init(_: &SysConfArgs) -> Result<Self>
+    where
+        Self: Sized,
+    {
+        Ok(Self)
+    }
+
     fn enter(&self) -> Result<()> {
         fs::write(
             format!("/sys/fs/cgroup/{SERVICE_NAME}/cpuset.cpus.partition"),
@@ -70,20 +105,34 @@ impl SysConf for CpusetExclusive {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct DisableSiblingCpus(Vec<u32>);
+pub struct NoHyperThreading(Vec<u32>);
 
-impl DisableSiblingCpus {
+impl NoHyperThreading {
+    fn setup(&self, op: &str, value: &str) -> Result<()> {
+        for &cpu in &self.0 {
+            let ctl_path = format!("/sys/devices/system/cpu/cpu{cpu}/online");
+            fs::write(ctl_path, value).with_context(|| format!("failed to {op} CPU {cpu}"))?;
+        }
+        Ok(())
+    }
+}
+
+#[typetag::serde]
+impl SysConf for NoHyperThreading {
     /// # Panics
     ///
     /// Panic if `cpus` is not sorted or have duplicated elements.
-    pub fn init(cpus: &[u32]) -> Result<Self> {
+    fn init(args: &SysConfArgs) -> Result<Self>
+    where
+        Self: Sized,
+    {
         assert!(
-            cpus.windows(2).all(|w| w[0] < w[1]),
+            args.cpus.windows(2).all(|w| w[0] < w[1]),
             "CPUs should be sorted and deduplicated",
         );
 
         let mut sibling_cpus = Vec::new();
-        for &cpu in cpus {
+        for &cpu in &args.cpus {
             let sibling_path =
                 format!("/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list");
             let siblings = fs::read_to_string(sibling_path).with_context(|| {
@@ -95,7 +144,7 @@ impl DisableSiblingCpus {
                 })?;
                 if sibling != cpu {
                     ensure!(
-                        !cpus.contains(&sibling),
+                        !args.cpus.contains(&sibling),
                         "CPU {cpu} and {sibling} are siblings, only one can be specified",
                     );
                     sibling_cpus.push(sibling);
@@ -105,24 +154,13 @@ impl DisableSiblingCpus {
         sibling_cpus.sort_unstable();
         sibling_cpus.dedup();
         ensure!(
-            !cpus.contains(&0) && !sibling_cpus.contains(&0),
+            !args.cpus.contains(&0) && !sibling_cpus.contains(&0),
             "CPU 0 and its siblints are not allowed for exclusive use",
         );
-        ensure!(cpus != sibling_cpus, "all allowed CPUs are siblings");
+        ensure!(args.cpus != sibling_cpus, "all allowed CPUs are siblings");
         Ok(Self(sibling_cpus))
     }
 
-    fn setup(&self, op: &str, value: &str) -> Result<()> {
-        for &cpu in &self.0 {
-            let ctl_path = format!("/sys/devices/system/cpu/cpu{cpu}/online");
-            fs::write(ctl_path, value).with_context(|| format!("failed to {op} CPU {cpu}"))?;
-        }
-        Ok(())
-    }
-}
-
-#[typetag::serde]
-impl SysConf for DisableSiblingCpus {
     fn enter(&self) -> Result<()> {
         self.setup("disable", "0")
     }
@@ -155,29 +193,6 @@ impl CpuFreq {
     const INTEL_NO_TURBO_PATH: &'static str = "/sys/devices/system/cpu/intel_pstate/no_turbo";
     const CPUFREQ_BOOST_PATH: &'static str = "/sys/devices/system/cpu/cpufreq/boost";
     const AMD_PSTATE_STATUS_PATH: &'static str = "/sys/devices/system/cpu/amd_pstate/status";
-
-    /// # Panics
-    ///
-    /// Panic if `cpus` is not sorted or have duplicated elements.
-    pub fn init(cpus: &[u32]) -> Result<Self> {
-        assert!(
-            cpus.windows(2).all(|w| w[0] < w[1]),
-            "CPUs should be sorted and deduplicated",
-        );
-        let prev_governors = cpus
-            .iter()
-            .map(|&cpu| {
-                let gov = fs::read_to_string(Self::governor_ctl_path(cpu))
-                    .with_context(|| format!("failed to read scaling governor of CPU {cpu}"))?;
-                Ok((cpu, gov))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let prev_turbo = Self::get_boost()?;
-        Ok(Self {
-            prev_governors,
-            prev_boost: prev_turbo,
-        })
-    }
 
     fn get_boost() -> Result<CpuBoost> {
         match fs::read_to_string(Self::INTEL_NO_TURBO_PATH) {
@@ -270,6 +285,33 @@ impl CpuFreq {
 
 #[typetag::serde]
 impl SysConf for CpuFreq {
+    /// # Panics
+    ///
+    /// Panic if `cpus` is not sorted or have duplicated elements.
+    fn init(args: &SysConfArgs) -> Result<Self>
+    where
+        Self: Sized,
+    {
+        assert!(
+            args.cpus.windows(2).all(|w| w[0] < w[1]),
+            "CPUs should be sorted and deduplicated",
+        );
+        let prev_governors = args
+            .cpus
+            .iter()
+            .map(|&cpu| {
+                let gov = fs::read_to_string(Self::governor_ctl_path(cpu))
+                    .with_context(|| format!("failed to read scaling governor of CPU {cpu}"))?;
+                Ok((cpu, gov))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let prev_turbo = Self::get_boost()?;
+        Ok(Self {
+            prev_governors,
+            prev_boost: prev_turbo,
+        })
+    }
+
     fn enter(&self) -> Result<()> {
         match &self.prev_boost {
             CpuBoost::Ignore => {}

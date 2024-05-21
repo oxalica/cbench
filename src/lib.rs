@@ -10,7 +10,7 @@ use itertools::Itertools;
 use named_lock::NamedLock;
 use owo_colors::OwoColorize;
 
-use crate::sysconf::SysConf;
+use crate::sysconf::{SysConf, SysConfArgs};
 
 mod sysconf;
 
@@ -260,15 +260,13 @@ fn main_exec(
 
     cpus.sort_unstable();
     cpus.dedup();
-
-    let confs = [
-        Box::new(sysconf::Aslr::init()?) as Box<dyn SysConf>,
-        Box::new(sysconf::CpusetExclusive),
-        Box::new(sysconf::CpuFreq::init(&cpus)?),
-        Box::new(sysconf::DisableSiblingCpus::init(&cpus)?),
-    ];
+    let conf_args = SysConfArgs { cpus };
+    let confs = sysconf::ALL_MODULES
+        .iter()
+        .map(|&(_name, ctor)| ctor(&conf_args))
+        .collect::<Result<Vec<_>>>()?;
     let setup_confs_json = serde_json::to_string(&confs).expect("serialization cannot fail");
-    let allowed_cpus = cpus.iter().join(",");
+    let allowed_cpus = conf_args.cpus.iter().join(",");
 
     for exe in bench_exes {
         let mut cmd = match &sudo_cmd {
