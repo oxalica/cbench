@@ -1,6 +1,7 @@
 use std::fs;
+use std::io::ErrorKind;
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 
@@ -133,10 +134,28 @@ impl SysConf for DisableSiblingCpus {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CpuFreq {
-    governors: Vec<(u32, String)>,
+    prev_governors: Vec<(u32, String)>,
+    prev_boost: CpuBoost,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+enum CpuBoost {
+    Ignore,
+    IntelNoTurbo(String),
+    CpufreqBoost(String),
+    /// Previous `energy_performance_available_preferences` for ALL cpus.
+    ///
+    /// When `amd_pstate=active`, we cannot easily disable turbo because cpufreq is fully
+    /// controlled by the firmware. We hereby need to set it to `passive` mode and disable `boost`.
+    /// In reset phase, we revert it back to `active` mode and recover settings according to this.
+    AmdPstateActivePrefs(Vec<(u32, String)>),
 }
 
 impl CpuFreq {
+    const INTEL_NO_TURBO_PATH: &'static str = "/sys/devices/system/cpu/intel_pstate/no_turbo";
+    const CPUFREQ_BOOST_PATH: &'static str = "/sys/devices/system/cpu/cpufreq/boost";
+    const AMD_PSTATE_STATUS_PATH: &'static str = "/sys/devices/system/cpu/amd_pstate/status";
+
     /// # Panics
     ///
     /// Panic if `cpus` is not sorted or have duplicated elements.
@@ -145,7 +164,7 @@ impl CpuFreq {
             cpus.windows(2).all(|w| w[0] < w[1]),
             "CPUs should be sorted and deduplicated",
         );
-        let governors = cpus
+        let prev_governors = cpus
             .iter()
             .map(|&cpu| {
                 let gov = fs::read_to_string(Self::governor_ctl_path(cpu))
@@ -153,7 +172,86 @@ impl CpuFreq {
                 Ok((cpu, gov))
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(Self { governors })
+        let prev_turbo = Self::get_boost()?;
+        Ok(Self {
+            prev_governors,
+            prev_boost: prev_turbo,
+        })
+    }
+
+    fn get_boost() -> Result<CpuBoost> {
+        match fs::read_to_string(Self::INTEL_NO_TURBO_PATH) {
+            Ok(s) if s.trim() != "1" => return Ok(CpuBoost::IntelNoTurbo(s)),
+            Ok(_) => {
+                eprintln!(
+                    "{}: Intel CPU turbo is already disabled",
+                    "warning".yellow().bold()
+                );
+                return Ok(CpuBoost::Ignore);
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => bail!(err),
+        }
+
+        match fs::read_to_string(Self::CPUFREQ_BOOST_PATH) {
+            Ok(s) if s.trim() != "0" => return Ok(CpuBoost::CpufreqBoost(s)),
+            Ok(_) => {
+                eprintln!(
+                    "{}: cpufreq boost is already disabled",
+                    "warning".yellow().bold()
+                );
+                return Ok(CpuBoost::Ignore);
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => bail!(err),
+        }
+
+        if fs::read_to_string(Self::AMD_PSTATE_STATUS_PATH).is_ok_and(|s| s.trim() == "active") {
+            // amd_pstate=active detected.
+            let mut prev_prefs = fs::read_dir("/sys/devices/system/cpu")?
+                .map(|ent| {
+                    let ent = ent?;
+                    let path = ent.path();
+                    if !ent.file_type()?.is_dir() {
+                        return Ok(None);
+                    }
+                    let Some(cpu) = path
+                        .file_name()
+                        .and_then(|s| s.to_str()?.strip_prefix("cpu")?.parse::<u32>().ok())
+                    else {
+                        return Ok(None);
+                    };
+                    let pref_path = path.join("cpufreq/energy_performance_preference");
+                    match fs::read_to_string(&pref_path)
+                        .with_context(|| format!("failed to read {}", pref_path.display()))
+                    {
+                        Ok(pref) => Ok(Some((cpu, pref))),
+                        // The file does not exist when CPU's offline. Skip in that case.
+                        Err(err)
+                            if err.downcast_ref::<std::io::Error>().unwrap().kind()
+                                == ErrorKind::NotFound
+                                && fs::read_to_string(path.join("online"))
+                                    .is_ok_and(|s| s.trim() == "0") =>
+                        {
+                            Ok(None)
+                        }
+                        Err(err) => Err(err),
+                    }
+                })
+                .filter_map(|ret| ret.transpose())
+                .collect::<Result<Vec<_>>>()
+                .context(
+                    "failed to read energy_performance_preference for amd_pstate active mode",
+                )?;
+            prev_prefs.sort_unstable_by_key(|(cpu, _)| *cpu);
+            return Ok(CpuBoost::AmdPstateActivePrefs(prev_prefs));
+        }
+
+        eprintln!(
+            "{}: unsupported CPU and/or cpufreq driver, skip disabling turbo/boost",
+            "warning".yellow().bold()
+        );
+        Ok(CpuBoost::Ignore)
     }
 
     fn governor_ctl_path(cpu: u32) -> String {
@@ -161,7 +259,7 @@ impl CpuFreq {
     }
 
     fn set_governors(&self, new_gov: Option<&str>) -> Result<()> {
-        for (cpu, prev_gov) in &self.governors {
+        for (cpu, prev_gov) in &self.prev_governors {
             let gov = new_gov.unwrap_or(prev_gov);
             fs::write(Self::governor_ctl_path(*cpu), gov)
                 .with_context(|| format!("failed to set scaling governor of CPU {cpu} to {gov}"))?;
@@ -173,10 +271,52 @@ impl CpuFreq {
 #[typetag::serde]
 impl SysConf for CpuFreq {
     fn enter(&self) -> Result<()> {
+        match &self.prev_boost {
+            CpuBoost::Ignore => {}
+            CpuBoost::IntelNoTurbo(_) => fs::write(Self::INTEL_NO_TURBO_PATH, "1")
+                .context("failed to disable Intel CPU turbo")?,
+            CpuBoost::CpufreqBoost(_) => {
+                fs::write(Self::CPUFREQ_BOOST_PATH, "0")
+                    .context("failed to disable cpufreq boost")?;
+            }
+            CpuBoost::AmdPstateActivePrefs(_) => {
+                fs::write(Self::AMD_PSTATE_STATUS_PATH, "passive")
+                    .context("failed to set amd_pstate to passive mode")?;
+                fs::write(Self::CPUFREQ_BOOST_PATH, "0")
+                    .context("failed to disable cpufreq boost")?;
+            }
+        }
         self.set_governors(Some("performance"))
     }
 
     fn leave(&self) -> Result<()> {
+        // NB. This may change driver state of amd_pstate which resets governors.
+        // Thus is need to be done before setting governors.
+        match &self.prev_boost {
+            CpuBoost::Ignore => {}
+            CpuBoost::IntelNoTurbo(prev) => {
+                fs::write(Self::INTEL_NO_TURBO_PATH, prev)
+                    .with_context(|| format!("failed to reset Intel CPU turbo to {prev:?}"))?;
+            }
+            CpuBoost::CpufreqBoost(prev) => {
+                fs::write(Self::CPUFREQ_BOOST_PATH, prev)
+                    .with_context(|| format!("failed to reset cpufreq boost to {prev:?}"))?;
+            }
+            CpuBoost::AmdPstateActivePrefs(prefs) => {
+                fs::write(Self::AMD_PSTATE_STATUS_PATH, "active")
+                    .context("failed to set amd_pstate to active mode")?;
+                for (cpu, pref) in prefs {
+                    let ctl_path = format!(
+                        "/sys/devices/system/cpu/cpu{cpu}/cpufreq/energy_performance_preference"
+                    );
+                    fs::write(ctl_path, pref).with_context(|| {
+                        format!(
+                            "failed to reset energy_performance_preference of CPU {cpu} to {pref:?}"
+                        )
+                    })?;
+                }
+            }
+        }
         self.set_governors(None)
     }
 }
