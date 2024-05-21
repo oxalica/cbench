@@ -1,6 +1,5 @@
 use std::convert::Infallible;
 use std::ffi::{OsStr, OsString};
-use std::fs;
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, ExitStatus, Stdio};
@@ -10,6 +9,10 @@ use cargo_metadata::Message;
 use itertools::Itertools;
 use named_lock::NamedLock;
 use owo_colors::OwoColorize;
+
+use crate::sysconf::SysConf;
+
+mod sysconf;
 
 const SERVICE_NAME: &str = "cbench.service";
 const SYSTEMD_RUN: &str = "systemd-run";
@@ -78,13 +81,13 @@ pub fn main() -> ExitCode {
     let argv0 = argv0.file_stem().and_then(|s| s.to_str()).unwrap_or("");
 
     let ret = if argv0 == SETUP_SENTINEL {
-        let (is_enter, setup) = (|| -> Result<(bool, SetupArgs)> {
+        let (is_enter, confs) = (|| -> Result<(bool, Vec<Box<dyn SysConf>>)> {
             let is_enter = args_iter.next().context("missing argv1")? == "1";
             let args = std::env::var(SETUP_SENTINEL).context("missing setup envvar")?;
             Ok((is_enter, serde_json::from_str(&args)?))
         })()
         .expect("setup args must be valid");
-        main_setup(is_enter, &setup)
+        main_setup(is_enter, &confs)
     } else {
         let mut args = match Args::parse(args_iter.collect()) {
             Ok(args) if !args.help => args,
@@ -198,55 +201,20 @@ fn main_build(cargo_args: &[impl AsRef<OsStr>], benches: &mut Vec<PathBuf>) -> R
     Ok(())
 }
 
-const ASLR_CTL: &str = "/proc/sys/kernel/randomize_va_space";
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SetupArgs {
-    prev_aslr: String,
-    sibling_cpus: Vec<u32>,
-    prev_governors: Vec<(u32, String)>,
-}
-
 /// Setup and cleanup of the benchmark environment.
 /// NB. This is executed with full privileges as root.
-fn main_setup(is_enter: bool, args: &SetupArgs) -> Result<()> {
+fn main_setup(is_enter: bool, confs: &[impl AsRef<dyn SysConf>]) -> Result<()> {
     // Ignore termination signals.
     ctrlc::set_handler(|| {})?;
 
-    if args.prev_aslr.trim() != "0" {
-        let data = if is_enter { "0" } else { &args.prev_aslr };
-        fs::write(ASLR_CTL, data)
-            .with_context(|| format!("failed to set ASLR state to {data:?}"))?;
-    }
-
     if is_enter {
-        fs::write(
-            format!("/sys/fs/cgroup/{SERVICE_NAME}/cpuset.cpus.partition"),
-            "root",
-        )
-        .context("failed to set cpuset partition to root")?;
-    }
-
-    if !args.sibling_cpus.is_empty() {
-        let (data, op) = if is_enter {
-            ("0", "disable")
-        } else {
-            ("1", "enable")
-        };
-        for &cpu in &args.sibling_cpus {
-            fs::write(format!("/sys/devices/system/cpu/cpu{cpu}/online"), data)
-                .with_context(|| format!("failed to {op} CPU {cpu}"))?;
+        for conf in confs {
+            conf.as_ref().enter()?;
         }
-    }
-
-    for (cpu, gov) in &args.prev_governors {
-        let data = if is_enter { "performance" } else { gov };
-        fs::write(
-            format!("/sys/devices/system/cpu/cpu{cpu}/cpufreq/scaling_governor"),
-            data,
-        )
-        .with_context(|| format!("failed to set scaling governor of CPU {cpu} to {data}"))?;
+    } else {
+        for conf in confs.iter().rev() {
+            conf.as_ref().leave()?;
+        }
     }
 
     Ok(())
@@ -284,57 +252,16 @@ fn main_exec(
         .to_str()
         .context("current executable path is not UTF-8")?;
 
-    let prev_aslr = fs::read_to_string(ASLR_CTL).context("failed to get current ASLR state")?;
-    if prev_aslr.trim() == "0" {
-        eprintln!("{}: ASLR is already disabled", "warning".yellow().bold());
-    }
-
     cpus.sort_unstable();
     cpus.dedup();
-    let mut sibling_cpus = Vec::new();
-    for &cpu in &cpus {
-        let siblings = fs::read_to_string(format!(
-            "/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list"
-        ))
-        .with_context(|| format!("failed to get siblings of CPU {cpu}, index out of bound?"))?;
-        for sibling in siblings.trim_end().split(',') {
-            let sibling = sibling
-                .parse::<u32>()
-                .with_context(|| format!("failed to parse siblings of CPU {cpu}: {siblings:?}"))?;
-            if sibling != cpu {
-                ensure!(
-                    !cpus.contains(&sibling),
-                    "CPU {cpu} and {sibling} are siblings, only one can be specified",
-                );
-                sibling_cpus.push(sibling);
-            }
-        }
-    }
-    sibling_cpus.sort_unstable();
-    sibling_cpus.dedup();
-    ensure!(
-        !cpus.contains(&0) && !sibling_cpus.contains(&0),
-        "CPU 0 and its siblints are not allowed for exclusive use",
-    );
-    ensure!(cpus != *sibling_cpus, "all allowed CPUs are siblings");
 
-    let prev_governors = cpus
-        .iter()
-        .map(|&cpu| {
-            let gov = fs::read_to_string(format!(
-                "/sys/devices/system/cpu/cpu{cpu}/cpufreq/scaling_governor"
-            ))
-            .with_context(|| format!("failed to read scaling governor of CPU {cpu}"))?;
-            Ok((cpu, gov))
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    let setup_args_json = serde_json::to_string(&SetupArgs {
-        prev_aslr,
-        sibling_cpus,
-        prev_governors,
-    })
-    .expect("serialization cannot fail");
+    let confs = [
+        Box::new(sysconf::Aslr::init()?) as Box<dyn SysConf>,
+        Box::new(sysconf::CpusetExclusive),
+        Box::new(sysconf::CpuFreq::init(&cpus)?),
+        Box::new(sysconf::DisableSiblingCpus::init(&cpus)?),
+    ];
+    let setup_confs_json = serde_json::to_string(&confs).expect("serialization cannot fail");
     let allowed_cpus = cpus.iter().join(",");
 
     for exe in bench_exes {
@@ -361,7 +288,7 @@ fn main_exec(
                 &format!("--uid={}", nix::unistd::getuid().as_raw()),
                 &format!("--gid={}", nix::unistd::getgid().as_raw()),
                 "--same-dir",
-                &format!("--setenv={SETUP_SENTINEL}={setup_args_json}"),
+                &format!("--setenv={SETUP_SENTINEL}={setup_confs_json}"),
                 &format!("--property=AllowedCPUs={allowed_cpus}"),
                 &format!("--property=ExecStartPre=!@{self_exe} {SETUP_SENTINEL} 1"),
                 &format!("--property=ExecStopPost=!@{self_exe} {SETUP_SENTINEL} 0"),
