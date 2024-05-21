@@ -22,6 +22,7 @@ struct Args {
     use_sudo: Option<OsString>,
     dry_run: bool,
     cpus: Vec<u32>,
+    setenv: Vec<String>,
     subcommand: OsString,
     rest_args: Vec<OsString>,
     verbatim_args: Vec<OsString>,
@@ -56,6 +57,8 @@ impl Args {
                     .collect::<Result<Vec<_>>>()
             })?
             .unwrap_or_else(|| vec![1]);
+        // NB. `values_from_os_str` does not support eq-separator.
+        this.setenv = args.values_from_str("--setenv")?;
 
         this.rest_args = args.finish();
         let subcmd = this
@@ -106,6 +109,7 @@ pub fn main() -> ExitCode {
                     args.use_sudo,
                     args.dry_run,
                     args.cpus,
+                    &args.setenv,
                 )
             })
         } else {
@@ -116,6 +120,7 @@ pub fn main() -> ExitCode {
                 args.use_sudo,
                 args.dry_run,
                 args.cpus,
+                &args.setenv,
             )
         }
     };
@@ -152,6 +157,11 @@ Options:
                             systemd.resource-control(5). Default: `1`.
                             Note that CPU 0 and its siblings must not be used,
                             since it's likely used for system tasks.
+  --setenv=ENV              Pass through environment variable ENV to the
+                            target process. By default the process will be run
+                            with systemd service's lcean default environment.
+                            Extra variables need to be explicitly pass in when
+                            necessary.
 "
     );
 }
@@ -242,12 +252,14 @@ fn main_setup(is_enter: bool, args: &SetupArgs) -> Result<()> {
     Ok(())
 }
 
+// TODO: Struct argument.
 fn main_exec(
     bench_exes: &[impl AsRef<OsStr>],
     bench_args: &[impl AsRef<OsStr>],
     sudo_cmd: Option<impl AsRef<OsStr>>,
     dry_run: bool,
     mut cpus: Vec<u32>,
+    envs: &[impl AsRef<OsStr>],
 ) -> Result<()> {
     const LOCK_NAME: &str = "cargo-cbench.lock";
 
@@ -354,6 +366,12 @@ fn main_exec(
                 &format!("--property=ExecStartPre=!@{self_exe} {SETUP_SENTINEL} 1"),
                 &format!("--property=ExecStopPost=!@{self_exe} {SETUP_SENTINEL} 0"),
             ]);
+        for env in envs {
+            let mut arg = OsString::from("--setenv=");
+            arg.push(env);
+            cmd.arg(arg);
+        }
+
         cmd.arg("--");
         cmd.arg(exe.as_ref());
         cmd.args(bench_args);

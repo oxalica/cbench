@@ -6,15 +6,25 @@ Currently only Linux/systemd is supported.
 
 ## Usages
 
-1. `cargo install --git https://github.com/oxalica/cargo-cbench.git`
-1. `cd` to your Rust project with [benches](cargo-bench).
-1. `cargo cbench` to run all benchmarks on CPU 1 with environment control.
+1.  `cargo install --git https://github.com/oxalica/cargo-cbench.git`
+1.  `cd` to your Rust project with [benches](cargo-bench).
+1.  Use `cargo cbench` to run all benchmarks on CPU 1 with environment control.
 
-   If extra cargo flags and/or bench flags are required, pass them as:
+    If extra cargo flags and/or bench flags are required, pass them as:
 
-   `cargo cbench [CARGO_ARGS]... -- [BENCH_ARGS]...`
+    `cargo cbench [CARGO_ARGS]... -- [BENCH_ARGS]...`
 
-   More options can be viewed in `cargo cbench --help`.
+    More options can be viewed in `cargo cbench --help`.
+1.  Binary `cbench` is also provided to execute arbitrary command in the
+    controlled environment. You can use it for other non-Rust benchmark tools,
+    eg:
+
+    `cbench --setenv=PATH hyperfine true`
+
+    Note: The target command will be run inside a systemd unit named
+    'cbench.service' as the current user. It will be in a clean environment
+    without inheriting from the current shell. You need to passthrough
+    environment variables explicitly when necessary via `--setenv=ENV`.
 
 ## What it does
 
