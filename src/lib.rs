@@ -207,13 +207,19 @@ fn main_setup(is_enter: bool, confs: &[impl AsRef<dyn SysConf>]) -> Result<()> {
     // Ignore termination signals.
     ctrlc::set_handler(|| {})?;
 
+    let print_err = |ret: Result<()>| {
+        if let Err(err) = ret {
+            eprintln!("{}: {:#}", "error".red().bold(), err);
+        }
+    };
+
     if is_enter {
         for conf in confs {
-            conf.as_ref().enter()?;
+            print_err(conf.as_ref().enter());
         }
     } else {
         for conf in confs.iter().rev() {
-            conf.as_ref().leave()?;
+            print_err(conf.as_ref().leave());
         }
     }
 
