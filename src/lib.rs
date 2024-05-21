@@ -69,7 +69,7 @@ impl Args {
     }
 }
 
-fn main() -> ExitCode {
+pub fn main() -> ExitCode {
     let mut args_iter = std::env::args_os();
     let argv0 = PathBuf::from(args_iter.next().expect("missing argv0"));
     let argv0 = argv0.file_stem().and_then(|s| s.to_str()).unwrap_or("");

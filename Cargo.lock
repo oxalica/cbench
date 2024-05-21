@@ -30,22 +30,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cargo-cbench"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "cargo_metadata",
- "ctrlc",
- "itertools",
- "named-lock",
- "nix",
- "owo-colors",
- "pico-args",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "cargo-platform"
 version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -66,6 +50,22 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "cbench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cargo_metadata",
+ "ctrlc",
+ "itertools",
+ "named-lock",
+ "nix",
+ "owo-colors",
+ "pico-args",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,7 +1,8 @@
 [package]
-name = "cargo-cbench"
+name = "cbench"
 version = "0.1.0"
 edition = "2021"
+default-run = "cbench"
 
 [dependencies]
 anyhow = "1"
