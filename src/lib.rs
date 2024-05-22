@@ -1,17 +1,15 @@
-use std::convert::Infallible;
 use std::ffi::{OsStr, OsString};
-use std::io::BufReader;
 use std::path::PathBuf;
-use std::process::{Command, ExitCode, ExitStatus, Stdio};
+use std::process::{Command, ExitCode, ExitStatus, Stdio, Termination};
 
 use anyhow::{ensure, Context, Result};
-use cargo_metadata::Message;
 use itertools::Itertools;
 use named_lock::NamedLock;
 use owo_colors::OwoColorize;
 
 use crate::sysconf::{SysConf, SysConfArgs};
 
+pub mod cli;
 mod sysconf;
 
 const SERVICE_NAME: &str = "cbench.service";
@@ -19,186 +17,23 @@ const SYSTEMD_RUN: &str = "systemd-run";
 
 const SETUP_SENTINEL: &str = "__cbench_setup";
 
-#[derive(Debug, Default)]
-struct Args {
-    help: bool,
-    use_sudo: Option<OsString>,
-    dry_run: bool,
-    cpus: Vec<u32>,
-    setenv: Vec<String>,
-    subcommand: OsString,
-    rest_args: Vec<OsString>,
-    verbatim_args: Vec<OsString>,
-}
-
-impl Args {
-    fn parse(mut args: Vec<OsString>) -> Result<Self> {
-        let mut this = Self::default();
-        if let Some(pos) = args.iter().position(|s| s == "--") {
-            this.verbatim_args = args.split_off(pos + 1);
-            args.pop();
-        }
-        let mut args = pico_args::Arguments::from_vec(args);
-        this.help = args.contains("--help");
-        this.dry_run = args.contains("--dry-run");
-        this.use_sudo = if args.contains("--use-sudo") {
-            Some("sudo".into())
-        } else {
-            args.opt_value_from_os_str("--use-sudo", |s| Ok::<_, Infallible>(s.to_owned()))?
-        };
-        this.cpus = args
-            .opt_value_from_fn("--cpus", |arg| {
-                arg.split(',')
-                    .map(|spec| {
-                        let (start, end) = match spec.split_once('-') {
-                            Some((start, end)) => (start.parse()?, Some(end.parse()?)),
-                            None => (spec.parse::<u32>()?, None),
-                        };
-                        Ok(start..=end.unwrap_or(start))
-                    })
-                    .flatten_ok()
-                    .collect::<Result<Vec<_>>>()
-            })?
-            .unwrap_or_else(|| vec![1]);
-        // NB. `values_from_os_str` does not support eq-separator.
-        this.setenv = args.values_from_str("--setenv")?;
-
-        this.rest_args = args.finish();
-        let subcmd = this
-            .rest_args
-            .first()
-            .context("missing command")?
-            .to_string_lossy();
-        ensure!(!subcmd.starts_with('-'), "invalid option: {subcmd}");
-        this.subcommand = this.rest_args.remove(0);
-        Ok(this)
-    }
-}
-
-pub fn main() -> ExitCode {
+pub fn maybe_run_setup() {
     let mut args_iter = std::env::args_os();
-    let argv0 = PathBuf::from(args_iter.next().expect("missing argv0"));
-    let argv0 = argv0.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-
-    let ret = if argv0 == SETUP_SENTINEL {
-        let (is_enter, confs) = (|| -> Result<(bool, Vec<Box<dyn SysConf>>)> {
-            let is_enter = args_iter.next().context("missing argv1")? == "1";
-            let args = std::env::var(SETUP_SENTINEL).context("missing setup envvar")?;
-            Ok((is_enter, serde_json::from_str(&args)?))
-        })()
-        .expect("setup args must be valid");
-        main_setup(is_enter, &confs)
-    } else {
-        let mut args = match Args::parse(args_iter.collect()) {
-            Ok(args) if !args.help => args,
-            Ok(_) => {
-                print_help();
-                return ExitCode::SUCCESS;
-            }
+    if args_iter.next().is_some_and(|arg| arg == SETUP_SENTINEL) {
+        let is_enter = args_iter.next().expect("setup arg must be given") == "1";
+        let confs = std::env::var(SETUP_SENTINEL)
+            .context("missing setup envvar")
+            .and_then(|v| Ok(serde_json::from_str::<Vec<Box<dyn SysConf>>>(&v)?))
+            .expect("setup args must be valid");
+        let code = match main_setup(is_enter, &confs) {
             Err(err) => {
-                eprintln!("{}: {err}", "error".red().bold());
-                print_help();
-                return ExitCode::FAILURE;
+                eprintln!("{}: {err:#}", "error".red().bold());
+                1
             }
+            Ok(()) => 0,
         };
-
-        if argv0 == "cargo-cbench" && args.subcommand == "cbench" {
-            args.verbatim_args.insert(0, "--bench".into());
-            let mut benches = Vec::new();
-            main_build(&args.rest_args, &mut benches).and_then(|()| {
-                main_exec(
-                    &benches,
-                    &args.verbatim_args,
-                    args.use_sudo,
-                    args.dry_run,
-                    args.cpus,
-                    &args.setenv,
-                )
-            })
-        } else {
-            args.rest_args.extend(args.verbatim_args);
-            main_exec(
-                &[&args.subcommand],
-                &args.rest_args,
-                args.use_sudo,
-                args.dry_run,
-                args.cpus,
-                &args.setenv,
-            )
-        }
-    };
-
-    match ret {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(err) => {
-            eprintln!("{}: {:#}", "error".red().bold(), err);
-            if let Some(ExitStatusError(st)) = err.downcast_ref() {
-                ExitCode::from((st.code().unwrap_or(1) as u8).max(1))
-            } else {
-                ExitCode::FAILURE
-            }
-        }
+        std::process::exit(code);
     }
-}
-
-fn print_help() {
-    println!(
-        "\
-Environment control for benchmarks
-
-USAGE: cargo cbench [OPTIONS]... [CARGO_ARGS]...
-       cargo cbench [OPTIONS]... [CARGO_ARGS]... -- [BENCH_ARGS]...
-       cbench [OPTIONS]... COMMAND [--] [COMMAND_ARGS]...
-
-Options:
-  --use-sudo[=<SUDO_CMD>]   Use 'sudo' or SUDO_CMD to execute 'systemd-run'
-                            instead of running it as current user and use its
-                            own authentication method (polkit, by default)
-  --cpus=SPECS
-  --cpus SPECS              Run benchmarks on specific CPUs exclusively. SPECS
-                            use the `AllowedCPUs=` syntax from
-                            systemd.resource-control(5). Default: `1`.
-                            Note that CPU 0 and its siblings must not be used,
-                            since it's likely used for system tasks.
-  --setenv=ENV              Pass through environment variable ENV to the
-                            target process. By default the process will be run
-                            with systemd service's lcean default environment.
-                            Extra variables need to be explicitly pass in when
-                            necessary.
-"
-    );
-}
-
-fn main_build(cargo_args: &[impl AsRef<OsStr>], benches: &mut Vec<PathBuf>) -> Result<()> {
-    let mut child = Command::new("cargo")
-        .args([
-            "bench",
-            "--message-format=json-render-diagnostics",
-            "--no-run",
-        ])
-        .args(cargo_args)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .context("failed to spawn cargo")?;
-
-    let rdr = BufReader::new(child.stdout.take().unwrap());
-    for msg in Message::parse_stream(rdr) {
-        let Message::CompilerArtifact(artifact) = msg? else {
-            continue;
-        };
-        if artifact.target.kind != ["bench"] {
-            continue;
-        }
-        let path = artifact
-            .executable
-            .context("missing bench executable")?
-            .into_std_path_buf();
-        benches.push(path);
-    }
-    exit_ok(child.wait()?)?;
-    Ok(())
 }
 
 /// Setup and cleanup of the benchmark environment.
@@ -227,7 +62,7 @@ fn main_setup(is_enter: bool, confs: &[impl AsRef<dyn SysConf>]) -> Result<()> {
 }
 
 // TODO: Struct argument.
-fn main_exec(
+pub fn main_exec(
     bench_exes: &[impl AsRef<OsStr>],
     bench_args: &[impl AsRef<OsStr>],
     sudo_cmd: Option<impl AsRef<OsStr>>,
@@ -327,15 +162,20 @@ fn main_exec(
 }
 
 // WAIT: Copied from unstable `std::process::ExitStatusError`.
-#[derive(Debug)]
-struct ExitStatusError(ExitStatus);
+#[derive(Debug, Clone, Copy)]
+pub struct ExitStatusError(ExitStatus);
 impl std::fmt::Display for ExitStatusError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "process exited unsuccessfully: {}", self.0)
     }
 }
 impl std::error::Error for ExitStatusError {}
-fn exit_ok(status: ExitStatus) -> Result<(), ExitStatusError> {
+impl Termination for ExitStatusError {
+    fn report(self) -> ExitCode {
+        ExitCode::from((self.0.code().unwrap_or(1) as u8).max(1))
+    }
+}
+pub fn exit_ok(status: ExitStatus) -> Result<(), ExitStatusError> {
     status
         .success()
         .then_some(())
