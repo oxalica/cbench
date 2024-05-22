@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::ErrorKind;
 
@@ -17,7 +18,7 @@ pub static ALL_MODULES: &[(&str, ModuleBuilder)] = &[
 
 #[derive(Debug)]
 pub struct SysConfArgs {
-    pub cpus: Vec<u32>,
+    pub cpus: BTreeSet<u32>,
 }
 
 /// Extensible system configuration change unit.
@@ -126,11 +127,6 @@ impl SysConf for NoHyperThreading {
     where
         Self: Sized,
     {
-        assert!(
-            args.cpus.windows(2).all(|w| w[0] < w[1]),
-            "CPUs should be sorted and deduplicated",
-        );
-
         let mut sibling_cpus = Vec::new();
         for &cpu in &args.cpus {
             let sibling_path =
@@ -157,7 +153,6 @@ impl SysConf for NoHyperThreading {
             !args.cpus.contains(&0) && !sibling_cpus.contains(&0),
             "CPU 0 and its siblints are not allowed for exclusive use",
         );
-        ensure!(args.cpus != sibling_cpus, "all allowed CPUs are siblings");
         Ok(Self(sibling_cpus))
     }
 
@@ -292,10 +287,6 @@ impl SysConf for CpuFreq {
     where
         Self: Sized,
     {
-        assert!(
-            args.cpus.windows(2).all(|w| w[0] < w[1]),
-            "CPUs should be sorted and deduplicated",
-        );
         let prev_governors = args
             .cpus
             .iter()

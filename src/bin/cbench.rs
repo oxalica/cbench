@@ -7,15 +7,7 @@ fn main() -> ExitCode {
     maybe_run_setup();
 
     let args: cli::Args = clap::Parser::parse();
-    let ret = main_exec(
-        &[args.command],
-        &args.command_args,
-        args.exec_args.use_sudo,
-        args.exec_args.dry_run,
-        args.exec_args.cpus.into_iter().collect(),
-        &args.exec_args.setenv,
-    );
-
+    let ret = main_exec(&args.exec_args, &[args.command], &args.command_args);
     match ret {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {

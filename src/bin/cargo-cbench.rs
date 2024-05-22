@@ -58,8 +58,8 @@ fn try_main(args: InnerArgs) -> Result<()> {
     }
 
     let mut benches = Vec::new();
-    // FIXME: CARGO
-    let mut child = Command::new("cargo")
+    let cargo_exe = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut child = Command::new(cargo_exe)
         .args([
             "bench",
             "--message-format=json-render-diagnostics",
@@ -88,14 +88,7 @@ fn try_main(args: InnerArgs) -> Result<()> {
     }
     exit_ok(child.wait()?)?;
 
-    main_exec(
-        &benches,
-        &bench_args,
-        args.exec_args.use_sudo,
-        args.exec_args.dry_run,
-        args.exec_args.cpus.into_iter().collect(),
-        &args.exec_args.setenv,
-    )?;
+    main_exec(&args.exec_args, &benches, &bench_args)?;
 
     Ok(())
 }

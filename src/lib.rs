@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::process::{Command, ExitCode, ExitStatus, Stdio, Termination};
 
 use anyhow::{ensure, Context, Result};
+use cli::ExecArgs;
 use itertools::Itertools;
 use named_lock::NamedLock;
 use owo_colors::OwoColorize;
@@ -61,14 +62,10 @@ fn main_setup(is_enter: bool, confs: &[impl AsRef<dyn SysConf>]) -> Result<()> {
     Ok(())
 }
 
-// TODO: Struct argument.
 pub fn main_exec(
+    args: &ExecArgs,
     bench_exes: &[impl AsRef<OsStr>],
     bench_args: &[impl AsRef<OsStr>],
-    sudo_cmd: Option<impl AsRef<OsStr>>,
-    dry_run: bool,
-    mut cpus: Vec<u32>,
-    envs: &[impl AsRef<OsStr>],
 ) -> Result<()> {
     const LOCK_NAME: &str = "cargo-cbench.lock";
 
@@ -93,9 +90,9 @@ pub fn main_exec(
         .to_str()
         .context("current executable path is not UTF-8")?;
 
-    cpus.sort_unstable();
-    cpus.dedup();
-    let conf_args = SysConfArgs { cpus };
+    let conf_args = SysConfArgs {
+        cpus: args.cpus.iter().copied().collect(),
+    };
     let confs = sysconf::ALL_MODULES
         .iter()
         .map(|&(_name, ctor)| ctor(&conf_args))
@@ -104,11 +101,11 @@ pub fn main_exec(
     let allowed_cpus = conf_args.cpus.iter().join(",");
 
     for exe in bench_exes {
-        let mut cmd = match &sudo_cmd {
+        let mut cmd = match &args.use_sudo {
             None => Command::new(SYSTEMD_RUN),
             Some(sudo) => Command::new(sudo),
         };
-        cmd.args(sudo_cmd.is_some().then_some(SYSTEMD_RUN))
+        cmd.args(args.use_sudo.is_some().then_some(SYSTEMD_RUN))
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
@@ -132,7 +129,7 @@ pub fn main_exec(
                 &format!("--property=ExecStartPre=!@{self_exe} {SETUP_SENTINEL} 1"),
                 &format!("--property=ExecStopPost=!@{self_exe} {SETUP_SENTINEL} 0"),
             ]);
-        for env in envs {
+        for env in &args.setenv {
             let mut arg = OsString::from("--setenv=");
             arg.push(env);
             cmd.arg(arg);
@@ -142,7 +139,7 @@ pub fn main_exec(
         cmd.arg(exe.as_ref());
         cmd.args(bench_args);
 
-        if dry_run {
+        if args.dry_run {
             eprintln!(
                 "{:>12} {}",
                 "WouldRun".green().bold(),
