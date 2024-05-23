@@ -1,30 +1,51 @@
-# cargo-cbench
+# [cargo-]cbench
 
-cargo-cbench is a wrapper on native `cargo bench` with environment control for
-more stable and reproducible benchmark results.
-Currently only Linux/systemd is supported.
+Environment control for benchmarks for Linux/systemd, stabilizing benchmark
+results from external noise.
 
-## Usages
+`cbench` can be used to run any programs. `cargo-cbench` is a wrapper giving a
+`cargo bench`-like interface for running [cargo benches][cargo-bench] conveniently.
 
-1.  `cargo install --git https://github.com/oxalica/cargo-cbench.git`
-1.  `cd` to your Rust project with [benches](cargo-bench).
-1.  Use `cargo cbench` to run all benchmarks on CPU 1 with environment control.
+We only set system environment for benchmarking programs, but do not do
+benchmarks or statistics ourselves. It's expected to be used together with
+benchmark frameworks/programs like [`criterion`][criterion] or
+[`hyperfine`][hyperfine].
 
-    If extra cargo flags and/or bench flags are required, pass them as:
+## Installation
 
-    `cargo cbench [CARGO_ARGS]... -- [BENCH_ARGS]...`
+`cargo install --git https://github.com/oxalica/cbench.git`
 
-    More options can be viewed in `cargo cbench --help`.
-1.  Binary `cbench` is also provided to execute arbitrary command in the
-    controlled environment. You can use it for other non-Rust benchmark tools,
-    eg:
+## Usage
 
-    `cbench --setenv=PATH hyperfine true`
+For Rust projects with cargo benches, simply replace `cargo bench` with
+`cargo cbench`:
 
-    Note: The target command will be run inside a systemd unit named
-    'cbench.service' as the current user. It will be in a clean environment
-    without inheriting from the current shell. You need to passthrough
-    environment variables explicitly when necessary via `--setenv=ENV`.
+`cargo cbench`
+
+This will setup the environment and tweak system configurables (see
+[the next section](#what-it-does)), run all cargo benchmarks in the current
+project, and finally revert changes to the original state.
+
+It will only allocate a single *exclusive* CPU for the benchmark. If your
+program is multi-threaded, you can allocate more by:
+
+`cargo cbench --cpus=1-2`
+
+Cargo flags and bench program flags can be passed using the same syntax:
+
+`cargo cbench --bench=bench1 --features=feat1 -- --exact foo`
+
+For other benchmarking frameworks, run `cbench` following by the command:
+
+`cbench hyperfine /some/benchee`
+
+By default, the target command will be run inside a systemd unit named
+'cbench.service' as the current user. It will be in a clean environment
+without inheriting from the current shell. If your command relies on some
+environment variables, you need to pass them explicitly via `--setenv=ENV` or
+`--setenv=ENV=VALUE`.
+
+More control arguments can be seen in `cbench --help`.
 
 ## What it does
 
@@ -38,6 +59,9 @@ Currently only Linux/systemd is supported.
   adaptive turbo/boost, via [CPU Performance Scaling][cpufreq].
 - `noirq`: Mask used CPU(s) from [IRQ affinity][irq-affinity].
 
+These control modules can be enabled or disabled individually via `--with=` or
+`--without=`.
+
 ## Privileged operations
 
 All settings mentioned above are privileged and machine global. To minimize the
@@ -49,7 +73,9 @@ use `sudo` instead.
 
 Note that no matter whether `--use-sudo` is used, the program compilation (via
 `cargo build`) and benchmark processes are always running as the current user.
-Never add `sudo` to `cargo cbench` itself!
+Never add `sudo` to `cargo cbench` itself! Even if you really want to run the
+target artifact/command as `root` because, say you are running `perf stat
+--all-kernel`, use the option `--root` for it.
 
 Environment modifications will be reverted after the program exits via systemd
 `ExecStopPost=` command, which will do the clean up even if the target process
@@ -57,9 +83,13 @@ aborted unexpectedly (eg. by Ctrl-C). If they do not, please report a bug.
 
 ## Credit
 
-Heavily motivated by [LLVM benchmarking tips][llvm-tips].
+- Heavily motivated by [LLVM benchmarking tips][llvm-tips].
+- Thank [QuarticCat@github](https://github.com/QuarticCat) for turbo/boost control tips.
+- Thank [PeterCxy@github](https://github.com/PeterCxy) for IRQ control tips.
 
 [cargo-bench]: https://doc.rust-lang.org/cargo/reference/profiles.html#bench
+[criterion]: https://github.com/bheisler/criterion.rs
+[hyperfine]: https://github.com/sharkdp/hyperfine
 [aslr]: https://en.wikipedia.org/wiki/Address_space_layout_randomization
 [randomize_va_space]: https://www.kernel.org/doc/html/latest/admin-guide/sysctl/kernel.html#randomize-va-space
 [cpuset]: https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html#cpuset-interface-files
