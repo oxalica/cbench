@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
-use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 
 use anyhow::{bail, ensure, Context, Result};
 use itertools::Itertools;
@@ -8,6 +7,29 @@ use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 
 use crate::SERVICE_NAME;
+
+/// Read from a virtual file and chomp away the trailing newline.
+fn read_vfile(path: &str) -> Result<String> {
+    let mut s = std::fs::read_to_string(path).with_context(|| format!("failed to read {path}"))?;
+    if s.ends_with('\n') {
+        s.pop();
+    }
+    Ok(s)
+}
+
+/// Write to a virtual file within a single syscall.
+fn write_vfile(path: &str, content: &str) -> Result<()> {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .map_err(Into::into)
+        .and_then(|mut f| match f.write(content.as_bytes()) {
+            Ok(n) if n == content.len() => Ok(()),
+            Ok(n) => bail!("partial write of {n} bytes"),
+            Err(err) => Err(err.into()),
+        })
+        .with_context(|| format!("failed to write {content:?} to {path}"))
+}
 
 macro_rules! modules {
     ($($ty:ident),* $(,)?) => { [$(($ty::init_boxed, $ty::NAME, $ty::HELP),)*] }
@@ -67,8 +89,8 @@ impl SysConf for NoAslr {
     where
         Self: Sized,
     {
-        let st = fs::read_to_string(Self::CTL_PATH).context("failed to get current ASLR state")?;
-        let st = if st.trim() == "0" {
+        let st = read_vfile(Self::CTL_PATH)?;
+        let st = if st == "0" {
             eprintln!("{}: ASLR is already disabled", "warning".yellow().bold());
             None
         } else {
@@ -78,13 +100,12 @@ impl SysConf for NoAslr {
     }
 
     fn enter(&self) -> Result<()> {
-        fs::write(Self::CTL_PATH, "0").context("failed to disable ASLR")
+        write_vfile(Self::CTL_PATH, "0")
     }
 
     fn leave(&self) -> Result<()> {
         if let Some(prev) = &self.prev {
-            fs::write(Self::CTL_PATH, prev)
-                .with_context(|| format!("failed to reset ASLR to {prev}"))?;
+            write_vfile(Self::CTL_PATH, prev)?;
         }
         Ok(())
     }
@@ -113,11 +134,10 @@ impl SysConf for CpusetExclusive {
 
     fn enter(&self) -> Result<()> {
         let value = if self.isolated { "isolated" } else { "root" };
-        fs::write(
-            format!("/sys/fs/cgroup/{SERVICE_NAME}/cpuset.cpus.partition"),
+        write_vfile(
+            &format!("/sys/fs/cgroup/{SERVICE_NAME}/cpuset.cpus.partition"),
             value,
         )
-        .context("failed to set cpuset partition to root")
     }
 
     fn leave(&self) -> Result<()> {
@@ -131,13 +151,18 @@ impl SysConf for CpusetExclusive {
 pub struct NoHyperThreading(Vec<u32>);
 
 impl NoHyperThreading {
+    fn cpu_online_path(cpu: u32) -> String {
+        format!("/sys/devices/system/cpu/cpu{cpu}/online")
+    }
+}
+
+impl NoHyperThreading {
     const NAME: &'static str = "noht";
     const HELP: &'static str = "Disable (set offline) CPU thread siblings of the CPU(s) used if hyper-threading is enabled";
 
-    fn setup(&self, op: &str, value: &str) -> Result<()> {
+    fn setup(&self, value: &str) -> Result<()> {
         for &cpu in &self.0 {
-            let ctl_path = format!("/sys/devices/system/cpu/cpu{cpu}/online");
-            fs::write(ctl_path, value).with_context(|| format!("failed to {op} CPU {cpu}"))?;
+            write_vfile(&Self::cpu_online_path(cpu), value)?;
         }
         Ok(())
     }
@@ -156,12 +181,10 @@ impl SysConf for NoHyperThreading {
         for &cpu in &args.cpus {
             let sibling_path =
                 format!("/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list");
-            let siblings = fs::read_to_string(sibling_path).with_context(|| {
-                format!("failed to get siblings of CPU {cpu}, index out of bound?")
-            })?;
-            for sibling in siblings.trim_end().split(',') {
+            let siblings_str = read_vfile(&sibling_path)?;
+            for sibling in siblings_str.split(',') {
                 let sibling = sibling.parse::<u32>().with_context(|| {
-                    format!("failed to parse siblings of CPU {cpu}: {siblings:?}")
+                    format!("failed to parse siblings of CPU {cpu}: {siblings_str:?}")
                 })?;
                 if sibling != cpu {
                     ensure!(
@@ -182,11 +205,11 @@ impl SysConf for NoHyperThreading {
     }
 
     fn enter(&self) -> Result<()> {
-        self.setup("disable", "0")
+        self.setup("0")
     }
 
     fn leave(&self) -> Result<()> {
-        self.setup("enable", "1")
+        self.setup("1")
     }
 }
 
@@ -219,8 +242,8 @@ impl CpuFreq {
     const AMD_PSTATE_STATUS_PATH: &'static str = "/sys/devices/system/cpu/amd_pstate/status";
 
     fn get_boost() -> Result<CpuBoost> {
-        match fs::read_to_string(Self::INTEL_NO_TURBO_PATH) {
-            Ok(s) if s.trim() != "1" => return Ok(CpuBoost::IntelNoTurbo(s)),
+        match read_vfile(Self::INTEL_NO_TURBO_PATH) {
+            Ok(s) if s != "1" => return Ok(CpuBoost::IntelNoTurbo(s)),
             Ok(_) => {
                 eprintln!(
                     "{}: Intel CPU turbo is already disabled",
@@ -228,12 +251,15 @@ impl CpuFreq {
                 );
                 return Ok(CpuBoost::Ignore);
             }
-            Err(err) if err.kind() == ErrorKind::NotFound => {}
-            Err(err) => bail!(err),
+            Err(err)
+                if err
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|err| err.kind() == ErrorKind::NotFound) => {}
+            Err(err) => return Err(err),
         }
 
-        match fs::read_to_string(Self::CPUFREQ_BOOST_PATH) {
-            Ok(s) if s.trim() != "0" => return Ok(CpuBoost::CpufreqBoost(s)),
+        match read_vfile(Self::CPUFREQ_BOOST_PATH) {
+            Ok(s) if s != "0" => return Ok(CpuBoost::CpufreqBoost(s)),
             Ok(_) => {
                 eprintln!(
                     "{}: cpufreq boost is already disabled",
@@ -241,36 +267,36 @@ impl CpuFreq {
                 );
                 return Ok(CpuBoost::Ignore);
             }
-            Err(err) if err.kind() == ErrorKind::NotFound => {}
-            Err(err) => bail!(err),
+            Err(err)
+                if err
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|err| err.kind() == ErrorKind::NotFound) => {}
+            Err(err) => return Err(err),
         }
 
-        if fs::read_to_string(Self::AMD_PSTATE_STATUS_PATH).is_ok_and(|s| s.trim() == "active") {
+        if read_vfile(Self::AMD_PSTATE_STATUS_PATH).is_ok_and(|s| s == "active") {
             // amd_pstate=active detected.
-            let mut prev_prefs = fs::read_dir("/sys/devices/system/cpu")?
+            let mut prev_prefs = std::fs::read_dir("/sys/devices/system/cpu")?
                 .map(|ent| {
                     let ent = ent?;
-                    let path = ent.path();
                     if !ent.file_type()?.is_dir() {
                         return Ok(None);
                     }
-                    let Some(cpu) = path
+                    let Some(cpu) = ent
                         .file_name()
-                        .and_then(|s| s.to_str()?.strip_prefix("cpu")?.parse::<u32>().ok())
+                        .to_str()
+                        .and_then(|s| s.strip_prefix("cpu")?.parse::<u32>().ok())
                     else {
                         return Ok(None);
                     };
-                    let pref_path = path.join("cpufreq/energy_performance_preference");
-                    match fs::read_to_string(&pref_path)
-                        .with_context(|| format!("failed to read {}", pref_path.display()))
-                    {
+                    match read_vfile(&Self::epp_path(cpu)) {
                         Ok(pref) => Ok(Some((cpu, pref))),
                         // The file does not exist when CPU's offline. Skip in that case.
                         Err(err)
                             if err.downcast_ref::<std::io::Error>().unwrap().kind()
                                 == ErrorKind::NotFound
-                                && fs::read_to_string(path.join("online"))
-                                    .is_ok_and(|s| s.trim() == "0") =>
+                                && read_vfile(&NoHyperThreading::cpu_online_path(cpu))
+                                    .is_ok_and(|s| s == "0") =>
                         {
                             Ok(None)
                         }
@@ -293,15 +319,18 @@ impl CpuFreq {
         Ok(CpuBoost::Ignore)
     }
 
-    fn governor_ctl_path(cpu: u32) -> String {
+    fn governor_path(cpu: u32) -> String {
         format!("/sys/devices/system/cpu/cpu{cpu}/cpufreq/scaling_governor")
+    }
+
+    fn epp_path(cpu: u32) -> String {
+        format!("/sys/devices/system/cpu/cpu{cpu}/cpufreq/energy_performance_preference")
     }
 
     fn set_governors(&self, new_gov: Option<&str>) -> Result<()> {
         for (cpu, prev_gov) in &self.prev_governors {
             let gov = new_gov.unwrap_or(prev_gov);
-            fs::write(Self::governor_ctl_path(*cpu), gov)
-                .with_context(|| format!("failed to set scaling governor of CPU {cpu} to {gov}"))?;
+            write_vfile(&Self::governor_path(*cpu), gov)?;
         }
         Ok(())
     }
@@ -320,8 +349,7 @@ impl SysConf for CpuFreq {
             .cpus
             .iter()
             .map(|&cpu| {
-                let gov = fs::read_to_string(Self::governor_ctl_path(cpu))
-                    .with_context(|| format!("failed to read scaling governor of CPU {cpu}"))?;
+                let gov = read_vfile(&Self::governor_path(cpu))?;
                 Ok((cpu, gov))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -335,17 +363,13 @@ impl SysConf for CpuFreq {
     fn enter(&self) -> Result<()> {
         match &self.prev_boost {
             CpuBoost::Ignore => {}
-            CpuBoost::IntelNoTurbo(_) => fs::write(Self::INTEL_NO_TURBO_PATH, "1")
-                .context("failed to disable Intel CPU turbo")?,
+            CpuBoost::IntelNoTurbo(_) => write_vfile(Self::INTEL_NO_TURBO_PATH, "1")?,
             CpuBoost::CpufreqBoost(_) => {
-                fs::write(Self::CPUFREQ_BOOST_PATH, "0")
-                    .context("failed to disable cpufreq boost")?;
+                write_vfile(Self::CPUFREQ_BOOST_PATH, "0")?;
             }
             CpuBoost::AmdPstateActivePrefs(_) => {
-                fs::write(Self::AMD_PSTATE_STATUS_PATH, "passive")
-                    .context("failed to set amd_pstate to passive mode")?;
-                fs::write(Self::CPUFREQ_BOOST_PATH, "0")
-                    .context("failed to disable cpufreq boost")?;
+                write_vfile(Self::AMD_PSTATE_STATUS_PATH, "passive")?;
+                write_vfile(Self::CPUFREQ_BOOST_PATH, "0")?
             }
         }
         self.set_governors(Some("performance"))
@@ -357,25 +381,15 @@ impl SysConf for CpuFreq {
         match &self.prev_boost {
             CpuBoost::Ignore => {}
             CpuBoost::IntelNoTurbo(prev) => {
-                fs::write(Self::INTEL_NO_TURBO_PATH, prev)
-                    .with_context(|| format!("failed to reset Intel CPU turbo to {prev:?}"))?;
+                write_vfile(Self::INTEL_NO_TURBO_PATH, prev)?;
             }
             CpuBoost::CpufreqBoost(prev) => {
-                fs::write(Self::CPUFREQ_BOOST_PATH, prev)
-                    .with_context(|| format!("failed to reset cpufreq boost to {prev:?}"))?;
+                write_vfile(Self::CPUFREQ_BOOST_PATH, prev)?;
             }
             CpuBoost::AmdPstateActivePrefs(prefs) => {
-                fs::write(Self::AMD_PSTATE_STATUS_PATH, "active")
-                    .context("failed to set amd_pstate to active mode")?;
+                write_vfile(Self::AMD_PSTATE_STATUS_PATH, "active")?;
                 for (cpu, pref) in prefs {
-                    let ctl_path = format!(
-                        "/sys/devices/system/cpu/cpu{cpu}/cpufreq/energy_performance_preference"
-                    );
-                    fs::write(ctl_path, pref).with_context(|| {
-                        format!(
-                            "failed to reset energy_performance_preference of CPU {cpu} to {pref:?}"
-                        )
-                    })?;
+                    write_vfile(&Self::epp_path(*cpu), pref)?;
                 }
             }
         }
@@ -400,11 +414,9 @@ impl NoIrq {
     }
 
     fn calc_masks_change(args: &SysConfArgs, path: &str) -> Result<Option<(String, String)>> {
-        let prev_masks =
-            fs::read_to_string(path).with_context(|| format!("failed to read {path}"))?;
+        let prev_masks = read_vfile(path)?;
 
         let mut masks = prev_masks
-            .trim()
             .split(',')
             .map(|seg| u32::from_str_radix(seg, 16))
             .collect::<Result<Vec<_>, _>>()?;
@@ -439,19 +451,18 @@ impl NoIrq {
     fn apply(&self, is_enter: bool) -> Result<()> {
         if let Some((prev, new)) = &self.default_affinity {
             let value = if is_enter { new } else { prev };
-            fs::write(Self::DEFAULT_AFFINITY_PATH, value)
-                .context("failed to set default_smp_affinity")?;
+            write_vfile(Self::DEFAULT_AFFINITY_PATH, value)?;
         }
 
         let mut errors = vec![];
         for (irq, prev_masks, new_masks) in &self.irq_affinity {
-            let path = Self::irq_smp_affinity_path(*irq);
             let value = if is_enter { new_masks } else { prev_masks };
-            if let Err(err) = fs::write(path, value) {
+            if let Err(err) = write_vfile(&Self::irq_smp_affinity_path(*irq), value) {
                 // Ignore EIO for unmaskable IRQs.
-                if !err
-                    .raw_os_error()
-                    .is_some_and(|err| err == nix::errno::Errno::EIO as i32)
+                if err
+                    .downcast_ref::<std::io::Error>()
+                    .and_then(|err| err.raw_os_error())
+                    != Some(nix::errno::Errno::EIO as i32)
                 {
                     errors.push((*irq, err));
                 }
@@ -477,7 +488,7 @@ impl SysConf for NoIrq {
             .context("failed to read default_smp_affinity")?;
 
         let mut irq_affinity = Vec::new();
-        for ent in fs::read_dir("/proc/irq").context("failed to list /proc/irq")? {
+        for ent in std::fs::read_dir("/proc/irq").context("failed to list /proc/irq")? {
             let ent = ent.context("failed to list /proc/irq")?;
             if !ent.file_type()?.is_dir() {
                 continue;
