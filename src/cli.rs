@@ -72,6 +72,12 @@ pub struct ExecArgs {
         hide_possible_values = true,
     )]
     pub without: Option<Vec<String>>,
+
+    /// Disable load balancing on used CPU(s). Only effective when `cpuset` module is enabled.
+    /// When only a single CPU is used, this option is implied.
+    /// It corresponds with `isolated` value for `cpuset.cpus.partition`.
+    #[arg(long)]
+    pub isolated: bool,
 }
 
 impl ExecArgs {
@@ -107,6 +113,7 @@ impl Default for ExecArgs {
             setenv: Vec::new(),
             with: default_sysconfs(),
             without: None,
+            isolated: false,
         }
     }
 }

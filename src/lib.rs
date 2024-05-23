@@ -92,6 +92,7 @@ pub fn main_exec(
 
     let conf_args = SysConfArgs {
         cpus: args.cpus.iter().copied().collect(),
+        isolated: args.isolated || args.cpus.len() == 1,
     };
     let confs = sysconf::ALL_MODULES
         .iter()

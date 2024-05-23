@@ -27,6 +27,7 @@ pub static ALL_MODULES: &[(ModuleBuilder, &str, &str)] = &modules![
 #[derive(Debug)]
 pub struct SysConfArgs {
     pub cpus: BTreeSet<u32>,
+    pub isolated: bool,
 }
 
 /// Extensible system configuration change unit.
@@ -90,7 +91,9 @@ impl SysConf for NoAslr {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct CpusetExclusive;
+pub struct CpusetExclusive {
+    isolated: bool,
+}
 
 impl CpusetExclusive {
     const NAME: &'static str = "cpuset";
@@ -99,17 +102,20 @@ impl CpusetExclusive {
 
 #[typetag::serde]
 impl SysConf for CpusetExclusive {
-    fn init(_: &SysConfArgs) -> Result<Self>
+    fn init(args: &SysConfArgs) -> Result<Self>
     where
         Self: Sized,
     {
-        Ok(Self)
+        Ok(Self {
+            isolated: args.isolated,
+        })
     }
 
     fn enter(&self) -> Result<()> {
+        let value = if self.isolated { "isolated" } else { "root" };
         fs::write(
             format!("/sys/fs/cgroup/{SERVICE_NAME}/cpuset.cpus.partition"),
-            "root",
+            value,
         )
         .context("failed to set cpuset partition to root")
     }
