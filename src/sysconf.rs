@@ -3,6 +3,7 @@ use std::fs;
 use std::io::ErrorKind;
 
 use anyhow::{bail, ensure, Context, Result};
+use itertools::Itertools;
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +20,7 @@ pub static ALL_MODULES: &[(ModuleBuilder, &str, &str)] = &modules![
     NoAslr,
     CpusetExclusive,
     CpuFreq,
+    NoIrq,
     NoHyperThreading,
 ];
 
@@ -372,5 +374,131 @@ impl SysConf for CpuFreq {
             }
         }
         self.set_governors(None)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NoIrq {
+    default_affinity: Option<(String, String)>,
+    irq_affinity: Vec<(u32, String, String)>,
+}
+
+impl NoIrq {
+    const NAME: &'static str = "noirq";
+    const HELP: &'static str = "Mask used CPU(s) from IRQ affinity";
+
+    const DEFAULT_AFFINITY_PATH: &'static str = "/proc/irq/default_smp_affinity";
+
+    fn irq_smp_affinity_path(irq: u32) -> String {
+        format!("/proc/irq/{irq}/smp_affinity")
+    }
+
+    fn calc_masks_change(args: &SysConfArgs, path: &str) -> Result<Option<(String, String)>> {
+        let prev_masks =
+            fs::read_to_string(path).with_context(|| format!("failed to read {path}"))?;
+
+        let mut masks = prev_masks
+            .trim()
+            .split(',')
+            .map(|seg| u32::from_str_radix(seg, 16))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Mask off every CPU used by us.
+        let mut changed = false;
+        for &cpu in &args.cpus {
+            // TODO: Is this using machine endianness?
+            let (idx, bit) = (cpu as usize / 32, 1u32 << (cpu % 32));
+            if masks[idx] & bit != 0 {
+                changed = true;
+                masks[idx] ^= bit;
+            }
+        }
+        // Skip uneffected IRQs.
+        if !changed {
+            return Ok(None);
+        }
+
+        // Do not leave it empty, it would be invalid. CPU 0 must not be used by us.
+        if masks.iter().all(|&m| m == 0) {
+            masks[0] = 1;
+        }
+
+        let new_masks = masks
+            .iter()
+            .format_with(",", |&m, f| f(&format_args!("{m:x}")))
+            .to_string();
+        Ok(Some((prev_masks, new_masks)))
+    }
+
+    fn apply(&self, is_enter: bool) -> Result<()> {
+        if let Some((prev, new)) = &self.default_affinity {
+            let value = if is_enter { new } else { prev };
+            fs::write(Self::DEFAULT_AFFINITY_PATH, value)
+                .context("failed to set default_smp_affinity")?;
+        }
+
+        let mut errors = vec![];
+        for (irq, prev_masks, new_masks) in &self.irq_affinity {
+            let path = Self::irq_smp_affinity_path(*irq);
+            let value = if is_enter { new_masks } else { prev_masks };
+            if let Err(err) = fs::write(path, value) {
+                // Ignore EIO for unmaskable IRQs.
+                if !err
+                    .raw_os_error()
+                    .is_some_and(|err| err == nix::errno::Errno::EIO as i32)
+                {
+                    errors.push((*irq, err));
+                }
+            }
+        }
+        for (irq, err) in errors {
+            eprintln!(
+                "{}: failed to set smp_affinity of IRQ {irq}: {err}",
+                "warning".yellow().bold(),
+            );
+        }
+        Ok(())
+    }
+}
+
+#[typetag::serde]
+impl SysConf for NoIrq {
+    fn init(args: &SysConfArgs) -> Result<Self>
+    where
+        Self: Sized,
+    {
+        let default_affinity = Self::calc_masks_change(args, Self::DEFAULT_AFFINITY_PATH)
+            .context("failed to read default_smp_affinity")?;
+
+        let mut irq_affinity = Vec::new();
+        for ent in fs::read_dir("/proc/irq").context("failed to list /proc/irq")? {
+            let ent = ent.context("failed to list /proc/irq")?;
+            if !ent.file_type()?.is_dir() {
+                continue;
+            }
+            let Some(irq) = ent.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+                continue;
+            };
+
+            let change = Self::calc_masks_change(args, &Self::irq_smp_affinity_path(irq))
+                .with_context(|| format!("failed to read smp_affinity of IRQ {irq}"))?;
+            if let Some((prev, new)) = change {
+                irq_affinity.push((irq, prev, new));
+            }
+        }
+        irq_affinity.sort_unstable_by_key(|(irq, ..)| *irq);
+
+        Ok(Self {
+            default_affinity,
+            irq_affinity,
+        })
+    }
+
+    fn enter(&self) -> Result<()> {
+        self.apply(true)
+    }
+
+    fn leave(&self) -> Result<()> {
+        self.apply(false)
     }
 }

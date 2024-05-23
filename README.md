@@ -36,6 +36,7 @@ Currently only Linux/systemd is supported.
   hyper-threading is enabled, via [CPU hotplug][cpu-hotplug].
 - `cpufreq`: Set power governor of target CPU(s) to 'performance' and disable
   adaptive turbo/boost, via [CPU Performance Scaling][cpufreq].
+- `noirq`: Mask used CPU(s) from [IRQ affinity][irq-affinity].
 
 ## Privileged operations
 
@@ -64,4 +65,5 @@ Heavily motivated by [LLVM benchmarking tips][llvm-tips].
 [cpuset]: https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html#cpuset-interface-files
 [cpu-hotplug]: https://www.kernel.org/doc/html/latest/core-api/cpu_hotplug.html#using-cpu-hotplug
 [cpufreq]: https://www.kernel.org/doc/html/latest/admin-guide/pm/cpufreq.html#policy-interface-in-sysfs
+[irq-affinity]: https://www.kernel.org/doc/html/latest/core-api/irq/irq-affinity.html
 [llvm-tips]: https://llvm.org/docs/Benchmarking.html
