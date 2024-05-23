@@ -122,14 +122,18 @@ pub fn main_exec(
                 "--description=Environment Controlled Benchmarks",
                 "--service-type=exec",
                 "--expand-environment=no",
-                &format!("--uid={}", nix::unistd::getuid().as_raw()),
-                &format!("--gid={}", nix::unistd::getgid().as_raw()),
                 "--same-dir",
                 &format!("--setenv={SETUP_SENTINEL}={setup_confs_json}"),
                 &format!("--property=AllowedCPUs={allowed_cpus}"),
                 &format!("--property=ExecStartPre=!@{self_exe} {SETUP_SENTINEL} 1"),
                 &format!("--property=ExecStopPost=!@{self_exe} {SETUP_SENTINEL} 0"),
             ]);
+        if !args.root {
+            cmd.args([
+                &format!("--uid={}", nix::unistd::getuid().as_raw()),
+                &format!("--gid={}", nix::unistd::getgid().as_raw()),
+            ]);
+        }
         for env in &args.setenv {
             let mut arg = OsString::from("--setenv=");
             arg.push(env);

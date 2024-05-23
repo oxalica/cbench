@@ -25,6 +25,10 @@ pub struct ExecArgs {
     #[arg(long, name = "SUDO_CMD", num_args = 0..=1, require_equals = true, default_missing_value = "sudo")]
     pub use_sudo: Option<OsString>,
 
+    /// Run the target process under `root` instead of current user and group.
+    #[arg(long)]
+    pub root: bool,
+
     /// Print what command will be executed without executing it, for debugging purpose.
     /// For `cargo-cbench` interface, the `cargo` command for compilation will still be executed.
     #[arg(long)]
@@ -97,6 +101,7 @@ impl Default for ExecArgs {
     fn default() -> Self {
         Self {
             use_sudo: None,
+            root: false,
             dry_run: false,
             cpus: <_>::from_iter([1]),
             setenv: Vec::new(),
