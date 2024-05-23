@@ -30,7 +30,7 @@ Currently only Linux/systemd is supported.
 
 - `noaslr`: Disable [Address Space Layout Randomization (ASLR)][aslr] via
   [`/proc/sys/kernel/randomize_va_space`][randomize_va_space]
-- `cpuset`: Pin the target process(es) on specific CPU(s) for exclusive access
+- `cpuset`: Pin the target process' cgroup on specific CPU(s) for exclusive use
   via [cgroup cpuset][cpuset].
 - `noht`: Disable (set offline) CPU thread siblings of the CPU(s) used if
   hyper-threading is enabled, via [CPU hotplug][cpu-hotplug].

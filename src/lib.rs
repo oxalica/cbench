@@ -11,7 +11,7 @@ use owo_colors::OwoColorize;
 use crate::sysconf::{SysConf, SysConfArgs};
 
 pub mod cli;
-mod sysconf;
+pub mod sysconf;
 
 const SERVICE_NAME: &str = "cbench.service";
 const SYSTEMD_RUN: &str = "systemd-run";
@@ -95,7 +95,8 @@ pub fn main_exec(
     };
     let confs = sysconf::ALL_MODULES
         .iter()
-        .map(|&(_name, ctor)| ctor(&conf_args))
+        .filter(|(_, name, ..)| args.is_module_enabled(name))
+        .map(|&(builder, ..)| builder(&conf_args))
         .collect::<Result<Vec<_>>>()?;
     let setup_confs_json = serde_json::to_string(&confs).expect("serialization cannot fail");
     let allowed_cpus = conf_args.cpus.iter().join(",");

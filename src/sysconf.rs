@@ -8,12 +8,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::SERVICE_NAME;
 
+macro_rules! modules {
+    ($($ty:ident),* $(,)?) => { [$(($ty::init_boxed, $ty::NAME, $ty::HELP),)*] }
+}
+
 type ModuleBuilder = fn(&SysConfArgs) -> Result<Box<dyn SysConf>>;
-pub static ALL_MODULES: &[(&str, ModuleBuilder)] = &[
-    ("noaslr", NoAslr::init_boxed),
-    ("cpuset", CpusetExclusive::init_boxed),
-    ("cpufreq", CpuFreq::init_boxed),
-    ("noht", NoHyperThreading::init_boxed),
+
+#[rustfmt::skip]
+pub static ALL_MODULES: &[(ModuleBuilder, &str, &str)] = &modules![
+    NoAslr,
+    CpusetExclusive,
+    CpuFreq,
+    NoHyperThreading,
 ];
 
 #[derive(Debug)]
@@ -46,6 +52,9 @@ pub struct NoAslr {
 }
 
 impl NoAslr {
+    const NAME: &'static str = "noaslr";
+    const HELP: &'static str = "Disable Address Space Layout Randomization (ASLR)";
+
     const CTL_PATH: &'static str = "/proc/sys/kernel/randomize_va_space";
 }
 
@@ -81,6 +90,11 @@ impl SysConf for NoAslr {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CpusetExclusive;
 
+impl CpusetExclusive {
+    const NAME: &'static str = "cpuset";
+    const HELP: &'static str = "Pin the process' cgroup on specific CPU(s) for exclusive use";
+}
+
 #[typetag::serde]
 impl SysConf for CpusetExclusive {
     fn init(_: &SysConfArgs) -> Result<Self>
@@ -109,6 +123,9 @@ impl SysConf for CpusetExclusive {
 pub struct NoHyperThreading(Vec<u32>);
 
 impl NoHyperThreading {
+    const NAME: &'static str = "noht";
+    const HELP: &'static str = "Disable (set offline) CPU thread siblings of the CPU(s) used if hyper-threading is enabled";
+
     fn setup(&self, op: &str, value: &str) -> Result<()> {
         for &cpu in &self.0 {
             let ctl_path = format!("/sys/devices/system/cpu/cpu{cpu}/online");
@@ -185,6 +202,10 @@ enum CpuBoost {
 }
 
 impl CpuFreq {
+    const NAME: &'static str = "cpufreq";
+    const HELP: &'static str =
+        "Set power governor of target CPU(s) to 'performance' and disable adaptive turbo/boost";
+
     const INTEL_NO_TURBO_PATH: &'static str = "/sys/devices/system/cpu/intel_pstate/no_turbo";
     const CPUFREQ_BOOST_PATH: &'static str = "/sys/devices/system/cpu/cpufreq/boost";
     const AMD_PSTATE_STATUS_PATH: &'static str = "/sys/devices/system/cpu/amd_pstate/status";

@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 
+use clap::builder::PossibleValue;
 use itertools::Itertools;
 
 /// Execute command in the controlled environment for benchmarks
@@ -40,6 +41,56 @@ pub struct ExecArgs {
     /// when necessary.
     #[arg(long, require_equals = true)]
     pub setenv: Vec<OsString>,
+
+    /// Only enable specific environment control modules. By default all supported modules are
+    /// enabled. Accept one or more strings separated by `,`.
+    #[arg(
+        long,
+        require_equals = true,
+        value_delimiter = ',',
+        value_parser = sysconf_values(),
+        default_values_os_t = default_sysconfs(),
+        // Duplicates with possible values.
+        hide_default_value = true,
+    )]
+    pub with: Vec<String>,
+
+    /// Exclude specific environment control modules from default. By default all supported modules
+    /// are enabled. The syntax is the same as `--with`.
+    #[arg(
+        long,
+        require_equals = true,
+        conflicts_with = "with",
+        value_delimiter = ',',
+        value_parser = sysconf_values(),
+        // Duplicates.
+        hide_default_value = true,
+        hide_possible_values = true,
+    )]
+    pub without: Option<Vec<String>>,
+}
+
+impl ExecArgs {
+    pub fn is_module_enabled(&self, name: &str) -> bool {
+        if let Some(without) = &self.without {
+            return without.iter().all(|s| s != name);
+        }
+        self.with.iter().any(|s| s == name)
+    }
+}
+
+fn sysconf_values() -> Vec<PossibleValue> {
+    crate::sysconf::ALL_MODULES
+        .iter()
+        .map(|(_ctor, name, help)| PossibleValue::new(name).help(help))
+        .collect()
+}
+
+fn default_sysconfs() -> Vec<String> {
+    crate::sysconf::ALL_MODULES
+        .iter()
+        .map(|(_ctor, name, ..)| name.to_string())
+        .collect()
 }
 
 impl Default for ExecArgs {
@@ -49,6 +100,8 @@ impl Default for ExecArgs {
             dry_run: false,
             cpus: <_>::from_iter([1]),
             setenv: Vec::new(),
+            with: default_sysconfs(),
+            without: None,
         }
     }
 }
