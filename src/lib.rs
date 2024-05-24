@@ -8,7 +8,8 @@ use anyhow::{ensure, Context, Result};
 use cli::ExecArgs;
 use itertools::Itertools;
 use named_lock::NamedLock;
-use owo_colors::{AnsiColors, OwoColorize};
+use owo_colors::AnsiColors;
+use serde::{Deserialize, Serialize};
 
 use crate::sysconf::{SysConf, SysConfArgs};
 
@@ -20,14 +21,27 @@ const SYSTEMD_RUN: &str = "systemd-run";
 
 const SETUP_SENTINEL: &str = "__cbench_setup";
 
+#[derive(Debug, Serialize, Deserialize)]
+struct SetupArgs {
+    systemd_pty_workaround: bool,
+    sysconf_args: SysConfArgs,
+    sysconfs: Vec<Box<dyn SysConf>>,
+}
+
 pub fn maybe_run_setup() {
     let mut args_iter = std::env::args_os();
     if !args_iter.next().is_some_and(|arg| arg == SETUP_SENTINEL) {
         return;
     }
 
-    let sd_pty_workaround = args_iter.next().unwrap() == "1";
-    if sd_pty_workaround {
+    let is_enter = args_iter.next().unwrap() == "1";
+
+    let args = std::env::var(SETUP_SENTINEL)
+        .context("missing setup envvar")
+        .and_then(|v| Ok(serde_json::from_str::<SetupArgs>(&v)?))
+        .expect("setup args must be valid");
+
+    if args.systemd_pty_workaround {
         // Workaround: reopen STDOUT and STDERR with `/dev/null`.
         // Unfortunately this suppresses all warnings and errors,
         // but I failed to come up with a better yet simple alternative.
@@ -41,14 +55,9 @@ pub fn maybe_run_setup() {
         }
     }
 
-    let is_enter = args_iter.next().unwrap() == "1";
-    let mut confs = std::env::var(SETUP_SENTINEL)
-        .context("missing setup envvar")
-        .and_then(|v| Ok(serde_json::from_str::<Vec<Box<dyn SysConf>>>(&v)?))
-        .expect("setup args must be valid");
-    let code = match main_setup(is_enter, &mut confs) {
+    let code = match main_setup(is_enter, &args) {
         Err(err) => {
-            eprintln!("{}: {err:#}", "error".red().bold());
+            args.sysconf_args.verbosity.error(format_args!("{err:#}"));
             1
         }
         Ok(()) => 0,
@@ -58,22 +67,25 @@ pub fn maybe_run_setup() {
 
 /// Setup and cleanup of the benchmark environment.
 /// NB. This is executed with full privileges as root.
-fn main_setup(is_enter: bool, confs: &mut [impl AsRef<dyn SysConf>]) -> Result<()> {
+fn main_setup(is_enter: bool, args: &SetupArgs) -> Result<()> {
     // Ignore termination signals.
-    ctrlc::set_handler(|| {})?;
+    if let Err(err) = ctrlc::set_handler(|| {}) {
+        args.sysconf_args
+            .verbosity
+            .error(format_args!("failed to set signal handlers: {err:#}"));
+    }
 
-    // TODO: Passthrough verbosity into setup?
-    let print_err = |ret: Result<()>| {
-        if let Err(err) = ret {
-            eprintln!("{}: {:#}", "error".red().bold(), err);
+    let run = |conf: &dyn SysConf| {
+        if let Err(err) = conf.apply(is_enter) {
+            args.sysconf_args.verbosity.error(format_args!("{err:#}"));
         }
     };
 
-    if !is_enter {
-        confs.reverse();
-    }
-    for conf in confs {
-        print_err(conf.as_ref().apply(is_enter));
+    let iter = args.sysconfs.iter().map(|s| &**s);
+    if is_enter {
+        iter.for_each(run);
+    } else {
+        iter.rev().for_each(run);
     }
 
     Ok(())
@@ -112,22 +124,25 @@ pub fn main_exec(
     // On systemd < 256, `systemd-run --pty` will block indefinitely when
     // `Exec{StartPre,StopPost}` prints something.
     // See: https://github.com/systemd/systemd/issues/32916
-    let sd_pty_workaround =
+    let systemd_pty_workaround =
         !args.pipe && get_systemd_major_version().context("failed to get systemd version")? < 256;
-    let sd_pty_workaround = sd_pty_workaround as u8;
 
-    let conf_args = SysConfArgs {
-        cpus: args.cpus.iter().copied().collect(),
+    let sysconf_args = SysConfArgs {
+        cpus: args.cpus.clone(),
         isolated: args.isolated || args.cpus.len() == 1,
         verbosity: args.verbosity,
     };
-    let confs = sysconf::ALL_MODULES
+    let sysconfs = sysconf::ALL_MODULES
         .iter()
         .filter(|(_, name, ..)| args.is_module_enabled(name))
-        .map(|&(builder, ..)| builder(&conf_args))
+        .map(|&(builder, ..)| builder(&sysconf_args))
         .collect::<Result<Vec<_>>>()?;
-    let setup_confs_json = serde_json::to_string(&confs).expect("serialization cannot fail");
-    let allowed_cpus = conf_args.cpus.iter().join(",");
+    let setup = SetupArgs {
+        systemd_pty_workaround,
+        sysconf_args,
+        sysconfs,
+    };
+    let setup_json = serde_json::to_string(&setup).expect("serialization cannot fail");
 
     for exe in bench_exes {
         let mut cmd = match &args.use_sudo {
@@ -150,14 +165,10 @@ pub fn main_exec(
                 "--service-type=exec",
                 "--expand-environment=no",
                 "--same-dir",
-                &format!("--setenv={SETUP_SENTINEL}={setup_confs_json}"),
-                &format!("--property=AllowedCPUs={allowed_cpus}"),
-                &format!(
-                    "--property=ExecStartPre=!@{self_exe} {SETUP_SENTINEL} {sd_pty_workaround} 1"
-                ),
-                &format!(
-                    "--property=ExecStopPost=!@{self_exe} {SETUP_SENTINEL} {sd_pty_workaround} 0"
-                ),
+                &format!("--setenv={SETUP_SENTINEL}={setup_json}"),
+                &format!("--property=AllowedCPUs={}", args.cpus.iter().join(",")),
+                &format!("--property=ExecStartPre=!@{self_exe} {SETUP_SENTINEL} 1"),
+                &format!("--property=ExecStopPost=!@{self_exe} {SETUP_SENTINEL} 0"),
             ]);
         if !args.root {
             cmd.args([

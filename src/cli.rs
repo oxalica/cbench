@@ -5,6 +5,7 @@ use std::fmt;
 use clap::builder::PossibleValue;
 use itertools::Itertools;
 use owo_colors::{AnsiColors, OwoColorize};
+use serde::{Deserialize, Serialize};
 
 /// Execute command in the controlled environment for benchmarks
 #[derive(Debug, PartialEq, Eq, clap::Parser)]
@@ -146,7 +147,7 @@ fn parse_cpu_spec(s: &str) -> Result<BTreeSet<u32>, std::num::ParseIntError> {
         .collect()
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::Args)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::Args)]
 pub struct Verbosity {
     /// More verbose output.
     #[arg(

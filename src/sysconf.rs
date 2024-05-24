@@ -47,7 +47,7 @@ pub static ALL_MODULES: &[(ModuleBuilder, &str, &str)] = &modules![
     NoHyperThreading,
 ];
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SysConfArgs {
     pub cpus: BTreeSet<u32>,
     pub isolated: bool,
