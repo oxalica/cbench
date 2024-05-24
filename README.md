@@ -1,15 +1,10 @@
 # [cargo-]cbench
 
-Environment control for benchmarks for Linux/systemd, stabilizing benchmark
-results from external noise.
+Environment control for benchmarks on Linux/systemd, reducing external noise
+from benchmark results.
 
 `cbench` can be used to run any programs. `cargo-cbench` is a wrapper giving a
 `cargo bench`-like interface for running [cargo benches][cargo-bench] conveniently.
-
-We only set system environment for benchmarking programs, but do not do
-benchmarks or statistics ourselves. It's expected to be used together with
-benchmark frameworks/programs like [`criterion`][criterion] or
-[`hyperfine`][hyperfine].
 
 ## Installation
 
@@ -62,6 +57,22 @@ More control arguments can be seen in `cbench --help`.
 These control modules can be enabled or disabled individually via `--with=` or
 `--without=`.
 
+## What it does NOT
+
+- We don't do benchmarks, but we setup environment and tunables for benchmark
+  programs to do benchmarks more reliably. It's expected to be used together
+  with benchmark frameworks/programs like [`criterion`][criterion] or
+  [`hyperfine`][hyperfine].
+
+- We reduce external noise from tainting the benchmark results. But we cannot
+  magically stabilize it from internal biases. Benchee may still be unstable
+  under different memory (heap and stack) layout caused by environment
+  variables or "being lucky" on program initialization, producing a
+  seemingly random systemic bias through multiple runs. You need to carefully
+  write your benchee program to reduce this effect.
+
+  See [stabilizer] for more information.
+
 ## Privileged operations
 
 All settings mentioned above are privileged and machine global. To minimize the
@@ -96,4 +107,5 @@ aborted unexpectedly (eg. by Ctrl-C). If they do not, please report a bug.
 [cpu-hotplug]: https://www.kernel.org/doc/html/latest/core-api/cpu_hotplug.html#using-cpu-hotplug
 [cpufreq]: https://www.kernel.org/doc/html/latest/admin-guide/pm/cpufreq.html#policy-interface-in-sysfs
 [irq-affinity]: https://www.kernel.org/doc/html/latest/core-api/irq/irq-affinity.html
+[stabilizer]: https://github.com/ccurtsinger/stabilizer
 [llvm-tips]: https://llvm.org/docs/Benchmarking.html
