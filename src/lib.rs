@@ -42,11 +42,11 @@ pub fn maybe_run_setup() {
     }
 
     let is_enter = args_iter.next().unwrap() == "1";
-    let confs = std::env::var(SETUP_SENTINEL)
+    let mut confs = std::env::var(SETUP_SENTINEL)
         .context("missing setup envvar")
         .and_then(|v| Ok(serde_json::from_str::<Vec<Box<dyn SysConf>>>(&v)?))
         .expect("setup args must be valid");
-    let code = match main_setup(is_enter, &confs) {
+    let code = match main_setup(is_enter, &mut confs) {
         Err(err) => {
             eprintln!("{}: {err:#}", "error".red().bold());
             1
@@ -58,7 +58,7 @@ pub fn maybe_run_setup() {
 
 /// Setup and cleanup of the benchmark environment.
 /// NB. This is executed with full privileges as root.
-fn main_setup(is_enter: bool, confs: &[impl AsRef<dyn SysConf>]) -> Result<()> {
+fn main_setup(is_enter: bool, confs: &mut [impl AsRef<dyn SysConf>]) -> Result<()> {
     // Ignore termination signals.
     ctrlc::set_handler(|| {})?;
 
@@ -69,14 +69,11 @@ fn main_setup(is_enter: bool, confs: &[impl AsRef<dyn SysConf>]) -> Result<()> {
         }
     };
 
-    if is_enter {
-        for conf in confs {
-            print_err(conf.as_ref().enter());
-        }
-    } else {
-        for conf in confs.iter().rev() {
-            print_err(conf.as_ref().leave());
-        }
+    if !is_enter {
+        confs.reverse();
+    }
+    for conf in confs {
+        print_err(conf.as_ref().apply(is_enter));
     }
 
     Ok(())

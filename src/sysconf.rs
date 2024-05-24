@@ -68,9 +68,7 @@ pub trait SysConf: std::fmt::Debug + 'static {
         Self::init(args).map(|this| Box::new(this) as _)
     }
 
-    fn enter(&self) -> Result<()>;
-
-    fn leave(&self) -> Result<()>;
+    fn apply(&self, is_enter: bool) -> Result<()>;
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -101,15 +99,12 @@ impl SysConf for NoAslr {
         Ok(Self { prev: st })
     }
 
-    fn enter(&self) -> Result<()> {
-        write_vfile(Self::CTL_PATH, "0")
-    }
-
-    fn leave(&self) -> Result<()> {
-        if let Some(prev) = &self.prev {
-            write_vfile(Self::CTL_PATH, prev)?;
-        }
-        Ok(())
+    fn apply(&self, is_enter: bool) -> Result<()> {
+        let Some(prev) = &self.prev else {
+            return Ok(());
+        };
+        let v = if is_enter { "0" } else { prev };
+        write_vfile(Self::CTL_PATH, v)
     }
 }
 
@@ -134,18 +129,18 @@ impl SysConf for CpusetExclusive {
         })
     }
 
-    fn enter(&self) -> Result<()> {
-        let value = if self.isolated { "isolated" } else { "root" };
-        write_vfile(
-            &format!("/sys/fs/cgroup/{SERVICE_NAME}/cpuset.cpus.partition"),
-            value,
-        )
-    }
-
-    fn leave(&self) -> Result<()> {
-        // The whole cgroup will be removed by systemd after the service exit.
-        // Nothing need to be done here.
-        Ok(())
+    fn apply(&self, is_enter: bool) -> Result<()> {
+        if is_enter {
+            let value = if self.isolated { "isolated" } else { "root" };
+            write_vfile(
+                &format!("/sys/fs/cgroup/{SERVICE_NAME}/cpuset.cpus.partition"),
+                value,
+            )
+        } else {
+            // The whole cgroup will be removed by systemd after the service exit.
+            // Nothing need to be done here.
+            Ok(())
+        }
     }
 }
 
@@ -161,13 +156,6 @@ impl NoHyperThreading {
 impl NoHyperThreading {
     const NAME: &'static str = "noht";
     const HELP: &'static str = "Disable (set offline) CPU thread siblings of the CPU(s) used if hyper-threading is enabled";
-
-    fn setup(&self, value: &str) -> Result<()> {
-        for &cpu in &self.0 {
-            write_vfile(&Self::cpu_online_path(cpu), value)?;
-        }
-        Ok(())
-    }
 }
 
 #[typetag::serde]
@@ -206,12 +194,12 @@ impl SysConf for NoHyperThreading {
         Ok(Self(sibling_cpus))
     }
 
-    fn enter(&self) -> Result<()> {
-        self.setup("0")
-    }
-
-    fn leave(&self) -> Result<()> {
-        self.setup("1")
+    fn apply(&self, is_enter: bool) -> Result<()> {
+        let v = if is_enter { "0" } else { "1" };
+        for &cpu in &self.0 {
+            write_vfile(&Self::cpu_online_path(cpu), v)?;
+        }
+        Ok(())
     }
 }
 
@@ -355,40 +343,32 @@ impl SysConf for CpuFreq {
         })
     }
 
-    fn enter(&self) -> Result<()> {
-        match &self.prev_boost {
-            CpuBoost::Ignore => {}
-            CpuBoost::IntelNoTurbo(_) => write_vfile(Self::INTEL_NO_TURBO_PATH, "1")?,
-            CpuBoost::CpufreqBoost(_) => {
-                write_vfile(Self::CPUFREQ_BOOST_PATH, "0")?;
-            }
-            CpuBoost::AmdPstateActivePrefs(_) => {
-                write_vfile(Self::AMD_PSTATE_STATUS_PATH, "passive")?;
-                write_vfile(Self::CPUFREQ_BOOST_PATH, "0")?
-            }
-        }
-        self.set_governors(Some("performance"))
-    }
-
-    fn leave(&self) -> Result<()> {
+    fn apply(&self, is_enter: bool) -> Result<()> {
         // NB. This may change driver state of amd_pstate which resets governors.
-        // Thus is need to be done before setting governors.
+        // Thus it always need to be done before setting governors.
         match &self.prev_boost {
             CpuBoost::Ignore => {}
             CpuBoost::IntelNoTurbo(prev) => {
-                write_vfile(Self::INTEL_NO_TURBO_PATH, prev)?;
+                let v = if is_enter { "1" } else { prev };
+                write_vfile(Self::INTEL_NO_TURBO_PATH, v)?
             }
             CpuBoost::CpufreqBoost(prev) => {
-                write_vfile(Self::CPUFREQ_BOOST_PATH, prev)?;
+                let v = if is_enter { "0" } else { prev };
+                write_vfile(Self::CPUFREQ_BOOST_PATH, v)?;
             }
             CpuBoost::AmdPstateActivePrefs(prefs) => {
-                write_vfile(Self::AMD_PSTATE_STATUS_PATH, "active")?;
-                for (cpu, pref) in prefs {
-                    write_vfile(&Self::epp_path(*cpu), pref)?;
+                if is_enter {
+                    write_vfile(Self::AMD_PSTATE_STATUS_PATH, "passive")?;
+                    write_vfile(Self::CPUFREQ_BOOST_PATH, "0")?
+                } else {
+                    write_vfile(Self::AMD_PSTATE_STATUS_PATH, "active")?;
+                    for (cpu, pref) in prefs {
+                        write_vfile(&Self::epp_path(*cpu), pref)?;
+                    }
                 }
             }
         }
-        self.set_governors(None)
+        self.set_governors(is_enter.then_some("performance"))
     }
 }
 
@@ -442,35 +422,6 @@ impl NoIrq {
             .to_string();
         Ok(Some((prev_masks, new_masks)))
     }
-
-    fn apply(&self, is_enter: bool) -> Result<()> {
-        if let Some((prev, new)) = &self.default_affinity {
-            let value = if is_enter { new } else { prev };
-            write_vfile(Self::DEFAULT_AFFINITY_PATH, value)?;
-        }
-
-        let mut errors = vec![];
-        for (irq, prev_masks, new_masks) in &self.irq_affinity {
-            let value = if is_enter { new_masks } else { prev_masks };
-            if let Err(err) = write_vfile(&Self::irq_smp_affinity_path(*irq), value) {
-                // Ignore EIO for unmaskable IRQs.
-                if err
-                    .downcast_ref::<std::io::Error>()
-                    .and_then(|err| err.raw_os_error())
-                    != Some(nix::errno::Errno::EIO as i32)
-                {
-                    errors.push((*irq, err));
-                }
-            }
-        }
-        for (irq, err) in errors {
-            eprintln!(
-                "{}: failed to set smp_affinity of IRQ {irq}: {err}",
-                "warning".yellow().bold(),
-            );
-        }
-        Ok(())
-    }
 }
 
 #[typetag::serde]
@@ -506,11 +457,32 @@ impl SysConf for NoIrq {
         })
     }
 
-    fn enter(&self) -> Result<()> {
-        self.apply(true)
-    }
+    fn apply(&self, is_enter: bool) -> Result<()> {
+        if let Some((prev, new)) = &self.default_affinity {
+            let value = if is_enter { new } else { prev };
+            write_vfile(Self::DEFAULT_AFFINITY_PATH, value)?;
+        }
 
-    fn leave(&self) -> Result<()> {
-        self.apply(false)
+        let mut errors = vec![];
+        for (irq, prev_masks, new_masks) in &self.irq_affinity {
+            let value = if is_enter { new_masks } else { prev_masks };
+            if let Err(err) = write_vfile(&Self::irq_smp_affinity_path(*irq), value) {
+                // Ignore EIO for unmaskable IRQs.
+                if err
+                    .downcast_ref::<std::io::Error>()
+                    .and_then(|err| err.raw_os_error())
+                    != Some(nix::errno::Errno::EIO as i32)
+                {
+                    errors.push((*irq, err));
+                }
+            }
+        }
+        for (irq, err) in errors {
+            eprintln!(
+                "{}: failed to set smp_affinity of IRQ {irq}: {err}",
+                "warning".yellow().bold(),
+            );
+        }
+        Ok(())
     }
 }
