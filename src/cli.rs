@@ -29,6 +29,11 @@ pub struct ExecArgs {
     #[arg(long)]
     pub root: bool,
 
+    /// Use `--pipe` instead of `--pty` for `systemd-run`.
+    /// This should only be used in scripts. See systemd-run(1) for differences.
+    #[arg(long)]
+    pub pipe: bool,
+
     /// Print what command will be executed without executing it, for debugging purpose.
     /// For `cargo-cbench` interface, the `cargo` command for compilation will still be executed.
     #[arg(long)]
@@ -108,6 +113,7 @@ impl Default for ExecArgs {
         Self {
             use_sudo: None,
             root: false,
+            pipe: false,
             dry_run: false,
             cpus: <_>::from_iter([1]),
             setenv: Vec::new(),

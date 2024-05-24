@@ -1,4 +1,6 @@
 use std::ffi::{OsStr, OsString};
+use std::fs::File;
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, ExitStatus, Stdio, Termination};
 
@@ -20,21 +22,38 @@ const SETUP_SENTINEL: &str = "__cbench_setup";
 
 pub fn maybe_run_setup() {
     let mut args_iter = std::env::args_os();
-    if args_iter.next().is_some_and(|arg| arg == SETUP_SENTINEL) {
-        let is_enter = args_iter.next().expect("setup arg must be given") == "1";
-        let confs = std::env::var(SETUP_SENTINEL)
-            .context("missing setup envvar")
-            .and_then(|v| Ok(serde_json::from_str::<Vec<Box<dyn SysConf>>>(&v)?))
-            .expect("setup args must be valid");
-        let code = match main_setup(is_enter, &confs) {
-            Err(err) => {
-                eprintln!("{}: {err:#}", "error".red().bold());
-                1
-            }
-            Ok(()) => 0,
-        };
-        std::process::exit(code);
+    if !args_iter.next().is_some_and(|arg| arg == SETUP_SENTINEL) {
+        return;
     }
+
+    let sd_pty_workaround = args_iter.next().unwrap() == "1";
+    if sd_pty_workaround {
+        // Workaround: reopen STDOUT and STDERR with `/dev/null`.
+        // Unfortunately this suppresses all warnings and errors,
+        // but I failed to come up with a better yet simple alternative.
+        if let Err(_err) = (|| -> Result<_> {
+            let devnull = File::open("/dev/null")?;
+            nix::unistd::dup2(devnull.as_raw_fd(), 1)?;
+            nix::unistd::dup2(devnull.as_raw_fd(), 2)?;
+            Ok(())
+        })() {
+            std::process::exit(2);
+        }
+    }
+
+    let is_enter = args_iter.next().unwrap() == "1";
+    let confs = std::env::var(SETUP_SENTINEL)
+        .context("missing setup envvar")
+        .and_then(|v| Ok(serde_json::from_str::<Vec<Box<dyn SysConf>>>(&v)?))
+        .expect("setup args must be valid");
+    let code = match main_setup(is_enter, &confs) {
+        Err(err) => {
+            eprintln!("{}: {err:#}", "error".red().bold());
+            1
+        }
+        Ok(()) => 0,
+    };
+    std::process::exit(code);
 }
 
 /// Setup and cleanup of the benchmark environment.
@@ -90,6 +109,13 @@ pub fn main_exec(
         .to_str()
         .context("current executable path is not UTF-8")?;
 
+    // On systemd < 256, `systemd-run --pty` will block indefinitely when
+    // `Exec{StartPre,StopPost}` prints something.
+    // See: https://github.com/systemd/systemd/issues/32916
+    let sd_pty_workaround =
+        !args.pipe && get_systemd_major_version().context("failed to get systemd version")? < 256;
+    let sd_pty_workaround = sd_pty_workaround as u8;
+
     let conf_args = SysConfArgs {
         cpus: args.cpus.iter().copied().collect(),
         isolated: args.isolated || args.cpus.len() == 1,
@@ -112,11 +138,9 @@ pub fn main_exec(
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .args([
+                if args.pipe { "--pipe" } else { "--pty" },
                 "--collect",
                 "--wait",
-                // WAIT: https://github.com/systemd/systemd/issues/32916
-                // It may block indefinitely when `Exec{StartPre,StopPost}` prints something.
-                "--pty",
                 &format!("--unit={SERVICE_NAME}"),
                 // It must be in a partition=root scope to set partition=root.
                 "--slice=-.slice",
@@ -126,8 +150,12 @@ pub fn main_exec(
                 "--same-dir",
                 &format!("--setenv={SETUP_SENTINEL}={setup_confs_json}"),
                 &format!("--property=AllowedCPUs={allowed_cpus}"),
-                &format!("--property=ExecStartPre=!@{self_exe} {SETUP_SENTINEL} 1"),
-                &format!("--property=ExecStopPost=!@{self_exe} {SETUP_SENTINEL} 0"),
+                &format!(
+                    "--property=ExecStartPre=!@{self_exe} {SETUP_SENTINEL} {sd_pty_workaround} 1"
+                ),
+                &format!(
+                    "--property=ExecStopPost=!@{self_exe} {SETUP_SENTINEL} {sd_pty_workaround} 0"
+                ),
             ]);
         if !args.root {
             cmd.args([
@@ -162,6 +190,24 @@ pub fn main_exec(
     }
 
     Ok(())
+}
+
+fn get_systemd_major_version() -> Result<u32> {
+    let output = Command::new(SYSTEMD_RUN)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .arg("--version")
+        .output()?;
+    exit_ok(output.status)?;
+    let output = String::from_utf8(output.stdout)?;
+    // Format: "systemd 255 (255.4)\n+PAM +AUDIT -SELINUX [..]\n"
+    let ver = output
+        .split(' ')
+        .nth(1)
+        .context("invalid format")?
+        .parse::<u32>()?;
+    Ok(ver)
 }
 
 // WAIT: Copied from unstable `std::process::ExitStatusError`.
