@@ -1,7 +1,6 @@
 use std::process::{ExitCode, Termination};
 
 use cbench::{cli, main_exec, maybe_run_setup, ExitStatusError};
-use owo_colors::OwoColorize;
 
 fn main() -> ExitCode {
     maybe_run_setup();
@@ -11,7 +10,7 @@ fn main() -> ExitCode {
     match ret {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("{}: {:#}", "error".red().bold(), err);
+            args.exec_args.verbosity.error(format_args!("{err:#}"));
             if let Ok(st) = err.downcast::<ExitStatusError>() {
                 st.report()
             } else {

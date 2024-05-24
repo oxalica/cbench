@@ -8,7 +8,7 @@ use anyhow::{ensure, Context, Result};
 use cli::ExecArgs;
 use itertools::Itertools;
 use named_lock::NamedLock;
-use owo_colors::OwoColorize;
+use owo_colors::{AnsiColors, OwoColorize};
 
 use crate::sysconf::{SysConf, SysConfArgs};
 
@@ -62,6 +62,7 @@ fn main_setup(is_enter: bool, confs: &[impl AsRef<dyn SysConf>]) -> Result<()> {
     // Ignore termination signals.
     ctrlc::set_handler(|| {})?;
 
+    // TODO: Passthrough verbosity into setup?
     let print_err = |ret: Result<()>| {
         if let Err(err) = ret {
             eprintln!("{}: {:#}", "error".red().bold(), err);
@@ -95,9 +96,11 @@ pub fn main_exec(
             .join(LOCK_NAME);
     let bench_lock = NamedLock::with_path(bench_lock_path)?;
     let _guard = bench_lock.try_lock().or_else(|_| {
-        eprintln!(
-            "{:>12} waiting for global benchmark lock",
-            "Blocking".cyan().bold(),
+        args.verbosity.status(
+            1,
+            AnsiColors::Cyan,
+            "Blocking",
+            "waiting for global benchmark lock",
         );
         bench_lock.lock()
     });
@@ -119,6 +122,7 @@ pub fn main_exec(
     let conf_args = SysConfArgs {
         cpus: args.cpus.iter().copied().collect(),
         isolated: args.isolated || args.cpus.len() == 1,
+        verbosity: args.verbosity,
     };
     let confs = sysconf::ALL_MODULES
         .iter()
@@ -138,6 +142,7 @@ pub fn main_exec(
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .args([
+                "--quiet",
                 if args.pipe { "--pipe" } else { "--pty" },
                 "--collect",
                 "--wait",
@@ -174,9 +179,10 @@ pub fn main_exec(
         cmd.args(bench_args);
 
         if args.dry_run {
-            eprintln!(
-                "{:>12} {}",
-                "WouldRun".green().bold(),
+            args.verbosity.status(
+                2,
+                AnsiColors::Green,
+                "WouldRun",
                 std::iter::once(cmd.get_program())
                     .chain(cmd.get_args())
                     .format_with(" ", |arg, f| f(&format_args!("{arg:?}"))),

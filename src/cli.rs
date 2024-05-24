@@ -1,8 +1,10 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
+use std::fmt;
 
 use clap::builder::PossibleValue;
 use itertools::Itertools;
+use owo_colors::{AnsiColors, OwoColorize};
 
 /// Execute command in the controlled environment for benchmarks
 #[derive(Debug, PartialEq, Eq, clap::Parser)]
@@ -20,6 +22,18 @@ pub struct Args {
 
 #[derive(Debug, PartialEq, Eq, clap::Args)]
 pub struct ExecArgs {
+    /// Behavior control options. ///
+
+    /// Print what command will be executed without executing it, for debugging purpose.
+    /// For `cargo-cbench` interface, the `cargo` command for compilation will still be executed.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    #[command(flatten)]
+    pub verbosity: Verbosity,
+
+    /// Systemd-run options. ///
+
     /// Use 'sudo' or SUDO_CMD to execute 'systemd-run' instead of running it as current user and
     /// use its own authentication method (PolKit)
     #[arg(long, name = "SUDO_CMD", num_args = 0..=1, require_equals = true, default_missing_value = "sudo")]
@@ -34,11 +48,6 @@ pub struct ExecArgs {
     #[arg(long)]
     pub pipe: bool,
 
-    /// Print what command will be executed without executing it, for debugging purpose.
-    /// For `cargo-cbench` interface, the `cargo` command for compilation will still be executed.
-    #[arg(long)]
-    pub dry_run: bool,
-
     /// The exclusive CPUs used for cpuset. CPUS use the `AllowedCPUs=` syntax from
     /// systemd.resource-control(5). Note that CPU 0 and its siblings must not be
     /// used, since it's special and likely to be used for system tasks.
@@ -50,6 +59,8 @@ pub struct ExecArgs {
     /// when necessary.
     #[arg(long, require_equals = true)]
     pub setenv: Vec<OsString>,
+
+    /// Sysconf options. ///
 
     /// Only enable specific environment control modules. By default all supported modules are
     /// enabled. Accept one or more strings separated by `,`.
@@ -111,10 +122,11 @@ fn default_sysconfs() -> Vec<String> {
 impl Default for ExecArgs {
     fn default() -> Self {
         Self {
+            dry_run: false,
+            verbosity: Verbosity::default(),
             use_sudo: None,
             root: false,
             pipe: false,
-            dry_run: false,
             cpus: <_>::from_iter([1]),
             setenv: Vec::new(),
             with: default_sysconfs(),
@@ -132,6 +144,59 @@ fn parse_cpu_spec(s: &str) -> Result<BTreeSet<u32>, std::num::ParseIntError> {
         })
         .flatten_ok()
         .collect()
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::Args)]
+pub struct Verbosity {
+    /// More verbose output.
+    #[arg(
+        long,
+        short,
+        action = clap::ArgAction::Count,
+    )]
+    pub verbose: u8,
+
+    /// More quiet output.
+    #[arg(
+        long,
+        short,
+        action = clap::ArgAction::Count,
+        conflicts_with = "verbose",
+    )]
+    pub quiet: u8,
+}
+
+impl Verbosity {
+    pub fn iter_flags(&self) -> impl Iterator<Item = &'static str> {
+        std::iter::repeat("-v")
+            .take(self.verbose.into())
+            .chain(std::iter::repeat("-q").take(self.quiet.into()))
+    }
+
+    pub fn error(&self, f: impl fmt::Display) {
+        self.println(2, format_args!("{}: {}", "error".bold().red(), f));
+    }
+
+    pub fn warning(&self, f: impl fmt::Display) {
+        self.println(1, format_args!("{}: {}", "warning".bold().yellow(), f));
+    }
+
+    pub fn status(&self, severity: i8, color: AnsiColors, header: &str, f: impl fmt::Display) {
+        let threshold = self.quiet as i8 - self.verbose as i8;
+        if threshold < severity {
+            self.println(
+                severity,
+                format_args!("{:>12} {}", header.bold().color(color), f),
+            );
+        }
+    }
+
+    fn println(&self, severity: i8, f: impl fmt::Display) {
+        let threshold = self.quiet as i8 - self.verbose as i8;
+        if threshold < severity {
+            eprintln!("{f}");
+        }
+    }
 }
 
 #[cfg(test)]

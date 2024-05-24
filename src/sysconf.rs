@@ -6,6 +6,7 @@ use itertools::Itertools;
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 
+use crate::cli::Verbosity;
 use crate::SERVICE_NAME;
 
 /// Read from a virtual file and chomp away the trailing newline.
@@ -50,6 +51,7 @@ pub static ALL_MODULES: &[(ModuleBuilder, &str, &str)] = &modules![
 pub struct SysConfArgs {
     pub cpus: BTreeSet<u32>,
     pub isolated: bool,
+    pub verbosity: Verbosity,
 }
 
 /// Extensible system configuration change unit.
@@ -85,13 +87,13 @@ impl NoAslr {
 
 #[typetag::serde]
 impl SysConf for NoAslr {
-    fn init(_: &SysConfArgs) -> Result<Self>
+    fn init(args: &SysConfArgs) -> Result<Self>
     where
         Self: Sized,
     {
         let st = read_vfile(Self::CTL_PATH)?;
         let st = if st == "0" {
-            eprintln!("{}: ASLR is already disabled", "warning".yellow().bold());
+            args.verbosity.warning("ASLR is already disabled");
             None
         } else {
             Some(st)
@@ -241,14 +243,12 @@ impl CpuFreq {
     const CPUFREQ_BOOST_PATH: &'static str = "/sys/devices/system/cpu/cpufreq/boost";
     const AMD_PSTATE_STATUS_PATH: &'static str = "/sys/devices/system/cpu/amd_pstate/status";
 
-    fn get_boost() -> Result<CpuBoost> {
+    fn get_boost(args: &SysConfArgs) -> Result<CpuBoost> {
         match read_vfile(Self::INTEL_NO_TURBO_PATH) {
             Ok(s) if s != "1" => return Ok(CpuBoost::IntelNoTurbo(s)),
             Ok(_) => {
-                eprintln!(
-                    "{}: Intel CPU turbo is already disabled",
-                    "warning".yellow().bold()
-                );
+                args.verbosity
+                    .warning("Intel CPU turbo is already disabled");
                 return Ok(CpuBoost::Ignore);
             }
             Err(err)
@@ -261,10 +261,7 @@ impl CpuFreq {
         match read_vfile(Self::CPUFREQ_BOOST_PATH) {
             Ok(s) if s != "0" => return Ok(CpuBoost::CpufreqBoost(s)),
             Ok(_) => {
-                eprintln!(
-                    "{}: cpufreq boost is already disabled",
-                    "warning".yellow().bold()
-                );
+                args.verbosity.warning("cpufreq boost is already disabled");
                 return Ok(CpuBoost::Ignore);
             }
             Err(err)
@@ -312,10 +309,8 @@ impl CpuFreq {
             return Ok(CpuBoost::AmdPstateActivePrefs(prev_prefs));
         }
 
-        eprintln!(
-            "{}: unsupported CPU and/or cpufreq driver, skip disabling turbo/boost",
-            "warning".yellow().bold()
-        );
+        args.verbosity
+            .warning("unsupported CPU and/or cpufreq driver, skip disabling turbo/boost");
         Ok(CpuBoost::Ignore)
     }
 
@@ -353,7 +348,7 @@ impl SysConf for CpuFreq {
                 Ok((cpu, gov))
             })
             .collect::<Result<Vec<_>>>()?;
-        let prev_turbo = Self::get_boost()?;
+        let prev_turbo = Self::get_boost(args)?;
         Ok(Self {
             prev_governors,
             prev_boost: prev_turbo,

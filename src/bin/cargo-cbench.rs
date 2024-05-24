@@ -5,7 +5,6 @@ use std::process::{Command, ExitCode, Stdio, Termination};
 use anyhow::{Context, Result};
 use cargo_metadata::Message;
 use cbench::{cli::ExecArgs, exit_ok, main_exec, maybe_run_setup, ExitStatusError};
-use owo_colors::OwoColorize;
 
 #[derive(Debug, PartialEq, Eq, clap::Parser)]
 #[command(name = "cargo", bin_name = "cargo")]
@@ -36,10 +35,11 @@ fn main() -> ExitCode {
     maybe_run_setup();
 
     let Args::Cbench(args) = clap::Parser::parse();
+    let verbosity = args.exec_args.verbosity;
     match try_main(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("{}: {:#}", "error".red().bold(), err);
+            verbosity.error(format_args!("{err:#}"));
             if let Ok(st) = err.downcast::<ExitStatusError>() {
                 st.report()
             } else {
@@ -56,6 +56,9 @@ fn try_main(args: InnerArgs) -> Result<()> {
         bench_args.extend(cargo_args.drain((pos + 1)..));
         cargo_args.pop();
     }
+
+    // Passthrough `-v` and `-q`.
+    cargo_args.extend(args.exec_args.verbosity.iter_flags().map(Into::into));
 
     let mut benches = Vec::new();
     let cargo_exe = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
