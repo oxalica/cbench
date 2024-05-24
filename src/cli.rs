@@ -182,6 +182,10 @@ impl Verbosity {
         self.println(1, format_args!("{}: {}", "warning".bold().yellow(), f));
     }
 
+    pub fn note(&self, f: impl fmt::Display) {
+        self.println(0, format_args!("{}: {}", "note".bold().cyan(), f));
+    }
+
     pub fn status(&self, severity: i8, color: AnsiColors, header: &str, f: impl fmt::Display) {
         let threshold = self.quiet as i8 - self.verbose as i8;
         if threshold < severity {

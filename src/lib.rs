@@ -76,7 +76,7 @@ fn main_setup(is_enter: bool, args: &SetupArgs) -> Result<()> {
     }
 
     let run = |conf: &dyn SysConf| {
-        if let Err(err) = conf.apply(is_enter) {
+        if let Err(err) = conf.apply(is_enter, &args.sysconf_args) {
             args.sysconf_args.verbosity.error(format_args!("{err:#}"));
         }
     };
@@ -126,6 +126,12 @@ pub fn main_exec(
     // See: https://github.com/systemd/systemd/issues/32916
     let systemd_pty_workaround =
         !args.pipe && get_systemd_major_version().context("failed to get systemd version")? < 256;
+    if systemd_pty_workaround {
+        args.verbosity.note(
+            "detected buggy systemd < 256 with `--pty`, \
+            suppressed all setup output as a workaround",
+        );
+    }
 
     let sysconf_args = SysConfArgs {
         cpus: args.cpus.clone(),

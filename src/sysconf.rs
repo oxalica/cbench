@@ -3,7 +3,6 @@ use std::io::{ErrorKind, Write};
 
 use anyhow::{bail, ensure, Context, Result};
 use itertools::Itertools;
-use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::Verbosity;
@@ -68,7 +67,7 @@ pub trait SysConf: std::fmt::Debug + 'static {
         Self::init(args).map(|this| Box::new(this) as _)
     }
 
-    fn apply(&self, is_enter: bool) -> Result<()>;
+    fn apply(&self, is_enter: bool, args: &SysConfArgs) -> Result<()>;
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -99,7 +98,7 @@ impl SysConf for NoAslr {
         Ok(Self { prev: st })
     }
 
-    fn apply(&self, is_enter: bool) -> Result<()> {
+    fn apply(&self, is_enter: bool, _: &SysConfArgs) -> Result<()> {
         let Some(prev) = &self.prev else {
             return Ok(());
         };
@@ -109,9 +108,7 @@ impl SysConf for NoAslr {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct CpusetExclusive {
-    isolated: bool,
-}
+pub struct CpusetExclusive;
 
 impl CpusetExclusive {
     const NAME: &'static str = "cpuset";
@@ -120,18 +117,16 @@ impl CpusetExclusive {
 
 #[typetag::serde]
 impl SysConf for CpusetExclusive {
-    fn init(args: &SysConfArgs) -> Result<Self>
+    fn init(_: &SysConfArgs) -> Result<Self>
     where
         Self: Sized,
     {
-        Ok(Self {
-            isolated: args.isolated,
-        })
+        Ok(Self)
     }
 
-    fn apply(&self, is_enter: bool) -> Result<()> {
+    fn apply(&self, is_enter: bool, args: &SysConfArgs) -> Result<()> {
         if is_enter {
-            let value = if self.isolated { "isolated" } else { "root" };
+            let value = if args.isolated { "isolated" } else { "root" };
             write_vfile(
                 &format!("/sys/fs/cgroup/{SERVICE_NAME}/cpuset.cpus.partition"),
                 value,
@@ -145,7 +140,9 @@ impl SysConf for CpusetExclusive {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct NoHyperThreading(Vec<u32>);
+pub struct NoHyperThreading {
+    sibling_cpus: Vec<u32>,
+}
 
 impl NoHyperThreading {
     fn cpu_online_path(cpu: u32) -> String {
@@ -191,12 +188,12 @@ impl SysConf for NoHyperThreading {
             !args.cpus.contains(&0) && !sibling_cpus.contains(&0),
             "CPU 0 and its siblints are not allowed for exclusive use",
         );
-        Ok(Self(sibling_cpus))
+        Ok(Self { sibling_cpus })
     }
 
-    fn apply(&self, is_enter: bool) -> Result<()> {
+    fn apply(&self, is_enter: bool, _: &SysConfArgs) -> Result<()> {
         let v = if is_enter { "0" } else { "1" };
-        for &cpu in &self.0 {
+        for &cpu in &self.sibling_cpus {
             write_vfile(&Self::cpu_online_path(cpu), v)?;
         }
         Ok(())
@@ -343,7 +340,7 @@ impl SysConf for CpuFreq {
         })
     }
 
-    fn apply(&self, is_enter: bool) -> Result<()> {
+    fn apply(&self, is_enter: bool, _: &SysConfArgs) -> Result<()> {
         // NB. This may change driver state of amd_pstate which resets governors.
         // Thus it always need to be done before setting governors.
         match &self.prev_boost {
@@ -457,13 +454,14 @@ impl SysConf for NoIrq {
         })
     }
 
-    fn apply(&self, is_enter: bool) -> Result<()> {
+    fn apply(&self, is_enter: bool, args: &SysConfArgs) -> Result<()> {
         if let Some((prev, new)) = &self.default_affinity {
             let value = if is_enter { new } else { prev };
             write_vfile(Self::DEFAULT_AFFINITY_PATH, value)?;
         }
 
-        let mut errors = vec![];
+        let mut ignored_errors = Vec::new();
+        let mut errors = Vec::new();
         for (irq, prev_masks, new_masks) in &self.irq_affinity {
             let value = if is_enter { new_masks } else { prev_masks };
             if let Err(err) = write_vfile(&Self::irq_smp_affinity_path(*irq), value) {
@@ -471,18 +469,27 @@ impl SysConf for NoIrq {
                 if err
                     .downcast_ref::<std::io::Error>()
                     .and_then(|err| err.raw_os_error())
-                    != Some(nix::errno::Errno::EIO as i32)
+                    == Some(nix::errno::Errno::EIO as i32)
                 {
+                    ignored_errors.push(*irq);
+                } else {
                     errors.push((*irq, err));
                 }
             }
         }
+
         for (irq, err) in errors {
-            eprintln!(
-                "{}: failed to set smp_affinity of IRQ {irq}: {err}",
-                "warning".yellow().bold(),
-            );
+            args.verbosity.warning(format_args!(
+                "failed to set smp_affinity of IRQ {irq}: {err}"
+            ));
         }
+        if !ignored_errors.is_empty() {
+            args.verbosity.note(format_args!(
+                "skipped smp_affinity of unmovable IRQs: {}",
+                ignored_errors.iter().join(", "),
+            ));
+        }
+
         Ok(())
     }
 }
