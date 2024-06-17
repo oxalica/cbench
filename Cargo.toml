@@ -6,6 +6,7 @@ description = "Environment control for benchmarks"
 repository = "https://github.com/oxalica/cbench"
 keywords = ["benchmark", "cpuset", "cpufreq"]
 categories = ["development-tools::profiling", "development-tools::cargo-plugins"]
+license = "GPL-3.0-or-later"
 default-run = "cbench"
 
 [dependencies]
