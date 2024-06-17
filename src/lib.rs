@@ -127,9 +127,9 @@ pub fn main_exec(
     let systemd_pty_workaround =
         !args.pipe && get_systemd_major_version().context("failed to get systemd version")? < 256;
     if systemd_pty_workaround {
-        args.verbosity.note(
-            "detected buggy systemd < 256 with `--pty`, \
-            suppressed all setup output as a workaround",
+        args.verbosity.warning(
+            "detected systemd < 256 with buggy `--pty` behavior, \
+            suppressing setup warnings and errors as workaround",
         );
     }
 
