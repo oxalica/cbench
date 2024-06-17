@@ -64,6 +64,10 @@ These control modules can be enabled or disabled individually via `--with=` or
   with benchmark frameworks/programs like [`criterion`][criterion] or
   [`hyperfine`][hyperfine].
 
+- Environment control does not make programs run faster, but typically in
+  opposite, because we disable frequency boost by default. Our goal is
+  consistency rather than performance.
+
 - We reduce external noise from tainting the benchmark results. But we cannot
   magically stabilize it from internal biases. Benchee may still be unstable
   under different memory (heap and stack) layout caused by environment
