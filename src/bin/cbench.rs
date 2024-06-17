@@ -6,7 +6,7 @@ fn main() -> ExitCode {
     maybe_run_setup();
 
     let args: cli::Args = clap::Parser::parse();
-    let ret = main_exec(&args.exec_args, &[args.command], &args.command_args);
+    let ret = main_exec(&args.exec_args, &args.command, &args.command_args);
     match ret {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {

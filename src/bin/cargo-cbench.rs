@@ -2,7 +2,7 @@ use std::ffi::OsString;
 use std::io::BufReader;
 use std::process::{Command, ExitCode, Stdio, Termination};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use cargo_metadata::Message;
 use cbench::{cli::ExecArgs, exit_ok, main_exec, maybe_run_setup, ExitStatusError};
 
@@ -91,7 +91,13 @@ fn try_main(args: InnerArgs) -> Result<()> {
     }
     exit_ok(child.wait()?)?;
 
-    main_exec(&args.exec_args, &benches, &bench_args)?;
+    match &*benches {
+        [] => bail!("no bench targets found"),
+        [bench_exe] => main_exec(&args.exec_args, bench_exe, &bench_args)?,
+        [..] => {
+            bail!("multiple benches found, please specify which bench to run using `--bench=`")
+        }
+    }
 
     Ok(())
 }

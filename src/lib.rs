@@ -4,7 +4,7 @@ use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, ExitStatus, Stdio, Termination};
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result};
 use cli::ExecArgs;
 use itertools::Itertools;
 use named_lock::NamedLock;
@@ -93,12 +93,10 @@ fn main_setup(is_enter: bool, args: &SetupArgs) -> Result<()> {
 
 pub fn main_exec(
     args: &ExecArgs,
-    bench_exes: &[impl AsRef<OsStr>],
-    bench_args: &[impl AsRef<OsStr>],
+    exe_path: &impl AsRef<OsStr>,
+    exe_args: &[impl AsRef<OsStr>],
 ) -> Result<()> {
     const LOCK_NAME: &str = "cargo-cbench.lock";
-
-    ensure!(!bench_exes.is_empty(), "nothing to bench");
 
     let bench_lock_path =
         PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").context("cannot get XDG runtime dir")?)
@@ -150,63 +148,61 @@ pub fn main_exec(
     };
     let setup_json = serde_json::to_string(&setup).expect("serialization cannot fail");
 
-    for exe in bench_exes {
-        let mut cmd = match &args.use_sudo {
-            None => Command::new(SYSTEMD_RUN),
-            Some(sudo) => Command::new(sudo),
-        };
-        cmd.args(args.use_sudo.is_some().then_some(SYSTEMD_RUN))
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .args([
-                "--quiet",
-                if args.pipe { "--pipe" } else { "--pty" },
-                "--collect",
-                "--wait",
-                &format!("--unit={SERVICE_NAME}"),
-                // It must be in a partition=root scope to set partition=root.
-                "--slice=-.slice",
-                "--description=Environment Controlled Benchmarks",
-                "--service-type=exec",
-                "--expand-environment=no",
-                "--same-dir",
-                &format!("--setenv={SETUP_SENTINEL}={setup_json}"),
-                &format!("--property=AllowedCPUs={}", args.cpus.iter().join(",")),
-                &format!("--property=ExecStartPre=!@{self_exe} {SETUP_SENTINEL} 1"),
-                &format!("--property=ExecStopPost=!@{self_exe} {SETUP_SENTINEL} 0"),
-            ]);
-        if !args.root {
-            cmd.args([
-                &format!("--uid={}", nix::unistd::getuid().as_raw()),
-                &format!("--gid={}", nix::unistd::getgid().as_raw()),
-            ]);
-        }
-        for env in &args.setenv {
-            let mut arg = OsString::from("--setenv=");
-            arg.push(env);
-            cmd.arg(arg);
-        }
+    let mut cmd = match &args.use_sudo {
+        None => Command::new(SYSTEMD_RUN),
+        Some(sudo) => Command::new(sudo),
+    };
+    cmd.args(args.use_sudo.is_some().then_some(SYSTEMD_RUN))
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .args([
+            "--quiet",
+            if args.pipe { "--pipe" } else { "--pty" },
+            "--collect",
+            "--wait",
+            &format!("--unit={SERVICE_NAME}"),
+            // It must be in a partition=root scope to set partition=root.
+            "--slice=-.slice",
+            "--description=Environment Controlled Benchmarks",
+            "--service-type=exec",
+            "--expand-environment=no",
+            "--same-dir",
+            &format!("--setenv={SETUP_SENTINEL}={setup_json}"),
+            &format!("--property=AllowedCPUs={}", args.cpus.iter().join(",")),
+            &format!("--property=ExecStartPre=!@{self_exe} {SETUP_SENTINEL} 1"),
+            &format!("--property=ExecStopPost=!@{self_exe} {SETUP_SENTINEL} 0"),
+        ]);
+    if !args.root {
+        cmd.args([
+            &format!("--uid={}", nix::unistd::getuid().as_raw()),
+            &format!("--gid={}", nix::unistd::getgid().as_raw()),
+        ]);
+    }
+    for env in &args.setenv {
+        let mut arg = OsString::from("--setenv=");
+        arg.push(env);
+        cmd.arg(arg);
+    }
 
-        cmd.arg("--");
-        cmd.arg(exe.as_ref());
-        cmd.args(bench_args);
+    cmd.arg("--");
+    cmd.arg(exe_path);
+    cmd.args(exe_args);
 
-        if args.dry_run {
-            args.verbosity.status(
-                2,
-                AnsiColors::Green,
-                "WouldRun",
-                std::iter::once(cmd.get_program())
-                    .chain(cmd.get_args())
-                    .format_with(" ", |arg, f| f(&format_args!("{arg:?}"))),
-            );
-        } else {
-            let st = cmd
-                .status()
-                .with_context(|| format!("failed to spawn {:?}", cmd.get_program()))?;
-            exit_ok(st)?;
-        }
+    if args.dry_run {
+        args.verbosity.status(
+            2,
+            AnsiColors::Green,
+            "WouldRun",
+            std::iter::once(cmd.get_program())
+                .chain(cmd.get_args())
+                .format_with(" ", |arg, f| f(&format_args!("{arg:?}"))),
+        );
+    } else {
+        let st = cmd
+            .status()
+            .with_context(|| format!("failed to spawn {:?}", cmd.get_program()))?;
+        exit_ok(st)?;
     }
 
     Ok(())
