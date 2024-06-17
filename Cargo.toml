@@ -2,6 +2,10 @@
 name = "cbench"
 version = "0.1.0"
 edition = "2021"
+description = "Environment control for benchmarks"
+repository = "https://github.com/oxalica/cbench"
+keywords = ["benchmark", "cpuset", "cpufreq"]
+categories = ["development-tools::profiling", "development-tools::cargo-plugins"]
 default-run = "cbench"
 
 [dependencies]

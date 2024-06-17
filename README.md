@@ -8,7 +8,7 @@ from benchmark results.
 
 ## Installation
 
-`cargo install --git https://github.com/oxalica/cbench.git`
+`cargo install cbench`
 
 ## Usage
 

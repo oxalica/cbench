@@ -1,3 +1,5 @@
+//! NB. This library crate is internal and unstable.
+//! Only the binary CLI (cbench and cargo-cbench) should be used instead.
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::os::fd::AsRawFd;
