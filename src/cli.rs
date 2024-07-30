@@ -3,7 +3,6 @@ use std::ffi::OsString;
 use std::fmt;
 
 use clap::builder::PossibleValue;
-use itertools::Itertools;
 use owo_colors::{AnsiColors, OwoColorize};
 use serde::{Deserialize, Serialize};
 
@@ -69,7 +68,7 @@ pub struct ExecArgs {
     /// The exclusive CPUs used for cpuset. CPUS use the `AllowedCPUs=` syntax from
     /// systemd.resource-control(5). Note that CPU 0 and its siblings must not be
     /// used, since it's special and likely to be used for system tasks.
-    #[arg(long, value_parser = parse_cpu_spec, default_value = "1", require_equals = true)]
+    #[arg(long, value_parser = crate::parse_cpu_spec, default_value = "1", require_equals = true)]
     pub cpus: BTreeSet<u32>,
 
     /// Pass through environment variable ENV to the target process. The benchmark process will be
@@ -152,16 +151,6 @@ impl Default for ExecArgs {
             isolated: false,
         }
     }
-}
-
-fn parse_cpu_spec(s: &str) -> Result<BTreeSet<u32>, std::num::ParseIntError> {
-    s.split(',')
-        .map(|spec| {
-            let (lhs, rhs) = spec.split_once('-').unwrap_or((spec, spec));
-            Ok(lhs.parse()?..=rhs.parse()?)
-        })
-        .flatten_ok()
-        .collect()
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::Args)]

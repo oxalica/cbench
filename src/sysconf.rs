@@ -6,7 +6,7 @@ use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::Verbosity;
-use crate::SERVICE_NAME;
+use crate::{parse_cpu_spec, SERVICE_NAME};
 
 /// Read from a virtual file and chomp away the trailing newline.
 fn read_vfile(path: &str) -> Result<String> {
@@ -169,10 +169,10 @@ impl SysConf for NoHyperThreading {
             let sibling_path =
                 format!("/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list");
             let siblings_str = read_vfile(&sibling_path)?;
-            for sibling in siblings_str.split(',') {
-                let sibling = sibling.parse::<u32>().with_context(|| {
-                    format!("failed to parse siblings of CPU {cpu}: {siblings_str:?}")
-                })?;
+            let siblings = parse_cpu_spec(&siblings_str).with_context(|| {
+                format!("failed to parse siblings of CPU {cpu}: {siblings_str:?}")
+            })?;
+            for &sibling in &siblings {
                 if sibling != cpu {
                     ensure!(
                         !args.cpus.contains(&sibling),

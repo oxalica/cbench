@@ -1,5 +1,6 @@
 //! NB. This library crate is internal and unstable.
 //! Only the binary CLI (cbench and cargo-cbench) should be used instead.
+use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::os::fd::AsRawFd;
@@ -226,6 +227,16 @@ fn get_systemd_major_version() -> Result<u32> {
         .context("invalid format")?
         .parse::<u32>()?;
     Ok(ver)
+}
+
+pub(crate) fn parse_cpu_spec(s: &str) -> Result<BTreeSet<u32>, std::num::ParseIntError> {
+    s.split(',')
+        .map(|spec| {
+            let (lhs, rhs) = spec.split_once('-').unwrap_or((spec, spec));
+            Ok(lhs.parse()?..=rhs.parse()?)
+        })
+        .flatten_ok()
+        .collect()
 }
 
 // WAIT: Copied from unstable `std::process::ExitStatusError`.
