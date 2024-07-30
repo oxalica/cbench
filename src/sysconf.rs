@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::io::{ErrorKind, Write};
+use std::io::{self, ErrorKind, Write};
 
 use anyhow::{bail, ensure, Context, Result};
 use itertools::Itertools;
@@ -235,7 +235,7 @@ impl CpuFreq {
             }
             Err(err)
                 if err
-                    .downcast_ref::<std::io::Error>()
+                    .downcast_ref::<io::Error>()
                     .is_some_and(|err| err.kind() == ErrorKind::NotFound) => {}
             Err(err) => return Err(err),
         }
@@ -248,7 +248,7 @@ impl CpuFreq {
             }
             Err(err)
                 if err
-                    .downcast_ref::<std::io::Error>()
+                    .downcast_ref::<io::Error>()
                     .is_some_and(|err| err.kind() == ErrorKind::NotFound) => {}
             Err(err) => return Err(err),
         }
@@ -272,7 +272,7 @@ impl CpuFreq {
                         Ok(pref) => Ok(Some((cpu, pref))),
                         // The file does not exist when CPU's offline. Skip in that case.
                         Err(err)
-                            if err.downcast_ref::<std::io::Error>().unwrap().kind()
+                            if err.downcast_ref::<io::Error>().unwrap().kind()
                                 == ErrorKind::NotFound
                                 && read_vfile(&NoHyperThreading::cpu_online_path(cpu))
                                     .is_ok_and(|s| s == "0") =>
@@ -319,19 +319,38 @@ impl SysConf for CpuFreq {
     where
         Self: Sized,
     {
-        let prev_governors = args
+        let ret = args
             .cpus
             .iter()
             .map(|&cpu| {
                 let gov = read_vfile(&Self::governor_path(cpu))?;
                 Ok((cpu, gov))
             })
-            .collect::<Result<Vec<_>>>()?;
-        let prev_turbo = Self::get_boost(args)?;
-        Ok(Self {
-            prev_governors,
-            prev_boost: prev_turbo,
-        })
+            .collect::<Result<Vec<_>>>();
+        match ret {
+            Ok(prev_governors) => {
+                let prev_turbo = Self::get_boost(args)?;
+                Ok(Self {
+                    prev_governors,
+                    prev_boost: prev_turbo,
+                })
+            }
+            Err(err)
+                if err
+                    .downcast_ref::<io::Error>()
+                    .is_some_and(|err| err.kind() == ErrorKind::NotFound) =>
+            {
+                args.verbosity.warning(
+                    "skipped cpufreq setting due to missing tunable paths. \
+                    Are you running on a virtual or unsupported CPU?",
+                );
+                Ok(Self {
+                    prev_governors: Vec::new(),
+                    prev_boost: CpuBoost::Ignore,
+                })
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn apply(&self, is_enter: bool, _: &SysConfArgs) -> Result<()> {
@@ -461,7 +480,7 @@ impl SysConf for NoIrq {
             if let Err(err) = write_vfile(&Self::irq_smp_affinity_path(*irq), value) {
                 // Ignore EIO for unmaskable IRQs.
                 if err
-                    .downcast_ref::<std::io::Error>()
+                    .downcast_ref::<io::Error>()
                     .and_then(|err| err.raw_os_error())
                     == Some(nix::errno::Errno::EIO as i32)
                 {
