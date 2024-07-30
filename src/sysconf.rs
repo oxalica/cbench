@@ -157,9 +157,6 @@ impl NoHyperThreading {
 
 #[typetag::serde]
 impl SysConf for NoHyperThreading {
-    /// # Panics
-    ///
-    /// Panic if `cpus` is not sorted or have duplicated elements.
     fn init(args: &SysConfArgs) -> Result<Self>
     where
         Self: Sized,
@@ -318,9 +315,6 @@ impl CpuFreq {
 
 #[typetag::serde]
 impl SysConf for CpuFreq {
-    /// # Panics
-    ///
-    /// Panic if `cpus` is not sorted or have duplicated elements.
     fn init(args: &SysConfArgs) -> Result<Self>
     where
         Self: Sized,
