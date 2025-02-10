@@ -17,7 +17,7 @@ pub enum Args {
 #[derive(Debug, Default, PartialEq, Eq, clap::Args)]
 #[command(version)]
 #[command(after_long_help = "\
-Copyright (C) 2024  Oxalica
+Copyright (C) 2024-2025  Oxalica
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
