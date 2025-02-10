@@ -11,10 +11,10 @@ default-run = "cbench"
 
 [dependencies]
 anyhow = "1"
-cargo_metadata = "0.18"
+cargo_metadata = "0.19"
 clap = { version = "4.5.4", features = ["derive"] }
 ctrlc = { version = "3", features = ["termination"] }
-itertools = "0.13.0"
+itertools = "0.14"
 named-lock = "0.4.1"
 nix = { version = "0.29", features = ["fs", "user"] }
 owo-colors = { version = "4.0.0", features = ["supports-colors"] }

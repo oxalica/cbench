@@ -3,7 +3,7 @@ use std::io::BufReader;
 use std::process::{Command, ExitCode, Stdio, Termination};
 
 use anyhow::{bail, Context, Result};
-use cargo_metadata::Message;
+use cargo_metadata::{Message, TargetKind};
 use cbench::{cli::ExecArgs, exit_ok, main_exec, maybe_run_setup, ExitStatusError};
 
 #[derive(Debug, PartialEq, Eq, clap::Parser)]
@@ -96,7 +96,7 @@ fn try_main(args: InnerArgs) -> Result<()> {
         let Message::CompilerArtifact(artifact) = msg? else {
             continue;
         };
-        if artifact.target.kind != ["bench"] {
+        if artifact.target.kind != [TargetKind::Bench] {
             continue;
         }
         let path = artifact
