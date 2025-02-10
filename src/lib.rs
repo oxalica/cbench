@@ -33,7 +33,7 @@ struct SetupArgs {
 
 pub fn maybe_run_setup() {
     let mut args_iter = std::env::args_os();
-    if !args_iter.next().is_some_and(|arg| arg == SETUP_SENTINEL) {
+    if args_iter.next().is_none_or(|arg| arg != SETUP_SENTINEL) {
         return;
     }
 

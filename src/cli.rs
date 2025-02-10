@@ -40,8 +40,7 @@ pub struct Args {
 
 #[derive(Debug, PartialEq, Eq, clap::Args)]
 pub struct ExecArgs {
-    /// Behavior control options. ///
-
+    // Behavior control options. //
     /// Print what command will be executed without executing it, for debugging purpose.
     /// For `cargo-cbench` interface, the `cargo` command for compilation will still be executed.
     #[arg(long)]
@@ -50,8 +49,7 @@ pub struct ExecArgs {
     #[command(flatten)]
     pub verbosity: Verbosity,
 
-    /// Systemd-run options. ///
-
+    // Systemd-run options. //
     /// Use 'sudo' or SUDO_CMD to execute 'systemd-run' instead of running it as current user and
     /// use its own authentication method (PolKit)
     #[arg(long, name = "SUDO_CMD", num_args = 0..=1, require_equals = true, default_missing_value = "sudo")]
@@ -78,8 +76,7 @@ pub struct ExecArgs {
     #[arg(long, require_equals = true)]
     pub setenv: Vec<OsString>,
 
-    /// Sysconf options. ///
-
+    // Sysconf options. //
     /// Only enable specific environment control modules. By default all supported modules are
     /// enabled. Accept one or more strings separated by `,`.
     #[arg(
@@ -175,7 +172,7 @@ pub struct Verbosity {
 }
 
 impl Verbosity {
-    pub fn iter_flags(&self) -> impl Iterator<Item = &'static str> {
+    pub fn iter_flags(&self) -> impl Iterator<Item = &'static str> + use<> {
         std::iter::repeat("-v")
             .take(self.verbose.into())
             .chain(std::iter::repeat("-q").take(self.quiet.into()))
