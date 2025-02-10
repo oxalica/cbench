@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fmt;
+use std::io::Write;
 
 use clap::builder::PossibleValue;
 use owo_colors::{AnsiColors, OwoColorize};
@@ -205,7 +206,9 @@ impl Verbosity {
     fn println(&self, severity: i8, f: impl fmt::Display) {
         let threshold = self.quiet as i8 - self.verbose as i8;
         if threshold < severity {
-            eprintln!("{f}");
+            let s = format!("{f}\n");
+            // Ignore logging errors, eg. broken pipes.
+            let _ = std::io::stderr().write_all(s.as_bytes());
         }
     }
 }
